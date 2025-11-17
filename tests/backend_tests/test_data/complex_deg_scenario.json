@@ -1,0 +1,99 @@
+[
+
+    {
+        "node_id": "N0",
+        "parent_id": null,
+        "execution_order_priority": 10,
+        "action": {
+            "tool_name": "goto_url",
+            "tool_args": { "url": "https://service.com/dashboard" },
+            "reasoning": "Start the task flow.",
+            "confidence_score": 0.99,
+            "expected_outcome": "Dashboard is loaded."
+        }
+    },
+
+
+    {
+        "node_id": "N1",
+        "parent_id": "N0",
+        "execution_order_priority": 5,
+        "action": {
+            "tool_name": "extract_element",
+            "tool_args": { "selector": "#main-table" },
+            "reasoning": "Attempt primary data extraction.",
+            "confidence_score": 0.95,
+            "expected_outcome": "Data table content extracted."
+        }
+    },
+
+
+    {
+        "node_id": "N2",
+        "parent_id": "N0",
+        "execution_order_priority": 20,
+        "action": {
+            "tool_name": "type_text",
+            "tool_args": { "selector": "#search-input", "text": "target_item" },
+            "reasoning": "Use search bar if main table is empty.",
+            "confidence_score": 0.7,
+            "expected_outcome": "Search results page appears."
+        }
+    },
+
+
+    {
+        "node_id": "N3",
+        "parent_id": "N1",
+        "execution_order_priority": 6,
+        "action": {
+            "tool_name": "click_element",
+            "tool_args": { "selector": "tr:first-child a.detail-link" },
+            "reasoning": "Navigate to the first item's detail page.",
+            "confidence_score": 0.9,
+            "expected_outcome": "Detail page loaded."
+        }
+    },
+
+
+    {
+        "node_id": "N4",
+        "parent_id": "N3",
+        "execution_order_priority": 1,
+        "action": {
+            "tool_name": "extract_text",
+            "tool_args": { "selector": "#price-tag" },
+            "reasoning": "Check high priority data (price).",
+            "confidence_score": 0.98,
+            "expected_outcome": "Price value extracted."
+        }
+    },
+
+
+    {
+        "node_id": "N5",
+        "parent_id": "N3",
+        "execution_order_priority": 10,
+        "action": {
+            "tool_name": "extract_text",
+            "tool_args": { "selector": "#availability-status" },
+            "reasoning": "Check low priority data (availability).",
+            "confidence_score": 0.85,
+            "expected_outcome": "Availability status extracted."
+        }
+    },
+
+
+    {
+        "node_id": "N6",
+        "parent_id": "N4",
+        "execution_order_priority": 7,
+        "action": {
+            "tool_name": "report_result",
+            "tool_args": { "summary": "Extracted price and availability." },
+            "reasoning": "Complete the task with final report.",
+            "confidence_score": 1.0,
+            "expected_outcome": "Final report generated."
+        }
+    }
+]
