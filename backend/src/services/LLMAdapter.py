@@ -1,63 +1,176 @@
 # 文件: backend/src/services/LLMAdapter.py
 
+import os
+import requests 
 import json
-from typing import List, Dict, Any
-from backend.src.data_models.decision_engine.decision_models import ExecutionNode, TaskGoal
+from dotenv import load_dotenv
+from typing import List, Optional
+from backend.src.data_models.decision_engine.decision_models import (
+    TaskGoal, ExecutionNode, WebObservation
+)
+
+# ----------------------------------------------------
+# 1. 配置加载 (Initialization)
+# ----------------------------------------------------
+
+# 加载 .env 文件中的环境变量
+load_dotenv() 
 
 class LLMAdapter:
     """
-    大语言模型 (LLM) 服务适配器。
-    这是一个抽象接口，负责与外部 LLM API 进行通信，
-    并确保其输出严格符合 ExecutionNode 的 JSON Schema。
+    LLM 适配器。
+    负责处理所有与 LLM API 相关的交互，包括：
+    1. 读取 API 密钥和 URL。
+    2. 将 Python 数据模型转换为 LLM 提示 (Prompt)。
+    3. 解析 LLM 返回的 JSON 结构化数据为 ExecutionNode 列表。
     """
     
-    @staticmethod
-    def _build_planning_prompt(task_goal: TaskGoal) -> str:
-        """
-        根据任务目标，构建用于请求 LLM 生成计划的Prompt。
-        这是规划智能的关键部分。
-        """
-        # [TODO: 配置化 Prompt 工程]
-        # 实际代码中，这会从配置文件或数据库中加载复杂的模板。
-        
-        prompt = (
-            f"你是一个专业的网页自动化规划引擎。你的目标是：'{task_goal.target_description}'。\n"
-            f"任务UUID: {task_goal.task_uuid}, 优先级: {task_goal.priority_level}。\n"
-            f"可用工具集: {task_goal.allowed_actions}。\n"
-            f"数据约束: {task_goal.required_data}\n\n"
-            "请将任务分解为一系列 ExecutionNode 结构体，以 JSON 数组的形式输出。\n"
-            "确保每个节点都包含 'execution_order_priority' 和 'parent_id' 来定义图结构。\n"
-            "如果无法确定子节点，请返回根节点和下一个明确的步骤。"
-        )
-        return prompt
+    API_KEY = os.getenv("LLM_API_KEY")
+    MODEL_NAME = os.getenv("LLM_MODEL_NAME", "deepseek-chat")
+    # 从 .env 文件中获取 API URL，默认为 DeepSeek 的官方端点
+    API_URL = os.getenv("LLM_API_URL", "https://api.deepseek.com/v1/chat/completions") 
+
+    if not API_KEY:
+        print("WARNING: LLM_API_KEY is not set in environment variables. Execution will fail.")
 
     @staticmethod
-    def generate_nodes(task_goal: TaskGoal) -> List[ExecutionNode]:
+    def _create_json_schema() -> dict:
         """
-        调用 LLM API，生成初始计划或重规划的 ExecutionNode 列表。
-        
-        !!! 注意: 在此演示中，我们必须返回一个合法的 List[ExecutionNode]。
-        由于无法调用外部 API，我们返回一个严格遵循 JSON Schema 的空列表。
-        您需要用实际的 API 调用替换 'json.loads' 部分。
+        动态生成 LLM 必须遵循的 JSON Schema，要求返回 ExecutionNode 列表。
         """
-        prompt = LLMAdapter._build_planning_prompt(task_goal)
+        # 使用 Pydantic 的内置方法生成 ExecutionNode 的 JSON Schema
+        node_schema = ExecutionNode.model_json_schema()
         
-        # [TODO: 实际 API 调用集成点]
-        # 实际代码会是: 
-        # llm_raw_response = external_llm_client.call(prompt, output_schema=ExecutionNode_Schema)
-        # ----------------------------------------------------------------------------------
+        # 封装成一个包含 execution_plan 数组的顶层对象
+        schema = {
+            "type": "object",
+            "properties": {
+                "execution_plan": {
+                    "type": "array",
+                    "description": "A list of structured execution nodes. The first node must be the root (parent_id: null).",
+                    "items": node_schema
+                }
+            },
+            "required": ["execution_plan"]
+        }
+        return schema
+
+    @staticmethod
+    def _create_api_payload(goal: TaskGoal, observation: Optional[WebObservation], json_schema: dict) -> dict:
+        """
+        构造发送给 LLM API 的请求 Payload。
+        """
+        # 1. 构造系统角色和约束
+        schema_text = json.dumps(json_schema, indent=2)
+        system_prompt = (
+            "You are the core planning engine for an industrial Web Agent. "
+            "Your task is to generate a structured execution plan (ExecutionNode list) based on the goal and current observation.\n"
+            "【Output Constraint】: You MUST strictly adhere to the provided JSON Schema, returning a single JSON object with the 'execution_plan' array. Do not output any prose or extra text.\n"
+            f"Allowed Tools: {goal.allowed_actions}\n"
+            f"Goal: {goal.target_description}\n\n"
+            f"【JSON Schema Constraint】:\n{schema_text}"
+        )
         
-        # *** 严格无硬编码的占位符 ***
-        # 假设 LLM 返回的 JSON 列表是空的，直到您实现 API 调用
-        llm_json_output = "[]" 
-        # ---------------------------
+        # 2. 构造用户消息 (包含当前状态)
+        observation_json = observation.model_dump_json(indent=2) if observation else "Initial state (No prior observation)."
+        user_message = (
+            f"Goal ID: {goal.task_uuid}\n"
+            f"Current Web Observation:\n{observation_json}\n\n"
+            "Generate the complete sequence of steps (ExecutionNode list) required to fulfill the task goal, prioritizing essential actions."
+        )
+
+        # 3. 构造请求体
+        payload = {
+            "model": LLMAdapter.MODEL_NAME,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            # 强制要求 JSON 输出格式
+            "response_format": {"type": "json_object"}, 
+            "temperature": 0.0, 
+        }
         
-        # Pydantic 严格验证和解析 JSON
-        raw_node_data: List[Dict[str, Any]] = json.loads(llm_json_output)
-        
-        nodes = []
-        for data in raw_node_data:
-            # 使用 model_validate 严格验证结构
-            nodes.append(ExecutionNode.model_validate(data))
+        return payload
+
+    @staticmethod
+    def generate_nodes(goal: TaskGoal, observation: Optional[WebObservation] = None) -> List[ExecutionNode]:
+        """
+        根据任务目标和当前观测结果，调用 LLM API 生成 ExecutionNode 列表。
+        """
+        if not LLMAdapter.API_KEY:
+            return []
             
-        return nodes
+        print(f"--- Calling LLM ({LLMAdapter.MODEL_NAME}) at URL: {LLMAdapter.API_URL} ---")
+        
+        json_schema = LLMAdapter._create_json_schema()
+        payload = LLMAdapter._create_api_payload(goal, observation, json_schema)
+        
+        # *********** DEBUG 日志输出 (打印请求 Payload) ***********
+        print("--- DEBUG: Full Request Payload (for debugging JSON Schema) ---")
+        payload_str = json.dumps(payload, indent=2, ensure_ascii=False)
+        print(payload_str[:500] + "..." if len(payload_str) > 500 else payload_str)
+        print("-----------------------------------------------------------------")
+        # ***************************************************************
+        
+        headers = {
+            "Authorization": f"Bearer {LLMAdapter.API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        # 2. 发起 API 调用
+        try:
+            # *********** 修正点：将超时时间设置为 90 秒 ***********
+            TIMEOUT_SECONDS = 90
+            response = requests.post(
+                LLMAdapter.API_URL, 
+                headers=headers, 
+                json=payload, 
+                timeout=TIMEOUT_SECONDS  
+            )
+            response.raise_for_status() # 检查 HTTP 错误 (4xx, 5xx)
+
+            response_data = response.json()
+            
+            # 3. 解析 LLM 返回的 JSON
+            json_content = response_data['choices'][0]['message']['content']
+            
+            # 4. JSON Decode
+            llm_output = json.loads(json_content)
+            raw_node_list = llm_output.get("execution_plan", [])
+            
+            if not raw_node_list:
+                 raise ValueError("LLM returned empty or missing 'execution_plan' array.")
+            
+            # 5. Pydantic 严格验证和实例化
+            node_list: List[ExecutionNode] = [
+                ExecutionNode.model_validate(data) for data in raw_node_list
+            ]
+            
+            return node_list
+
+        except requests.exceptions.HTTPError as e:
+            print(f"API Request FAILED (HTTP Error {e.response.status_code}): {e}")
+            try:
+                error_details = e.response.json()
+                print(f"ERROR DETAILS (from API): {json.dumps(error_details, indent=2)}")
+            except:
+                print("ERROR DETAILS: API did not return valid JSON response.")
+            return []
+
+        except requests.exceptions.RequestException as e:
+            print(f"API Request FAILED (Network/Connection Error): {e}")
+            return []
+            
+        except (KeyError, json.JSONDecodeError, ValueError) as e:
+            # LLM 返回了 JSON 但格式错误或 Pydantic 验证失败
+            print(f"API Response Parsing FAILED (LLM output format error/Pydantic validation): {e}")
+            
+            # 打印调试信息：原始响应内容和用于约束的 Schema
+            try:
+                # 尝试获取完整的响应文本
+                print(f"DEBUG: Raw LLM response content: {response.text}")
+            except:
+                pass
+            print(f"DEBUG: Payload JSON Schema was enforced: {json.dumps(json_schema, indent=2)}")
+            return []
