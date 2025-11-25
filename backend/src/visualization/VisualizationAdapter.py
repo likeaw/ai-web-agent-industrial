@@ -75,6 +75,7 @@ class VisualizationAdapter:
                 f"Status: {node.current_status.name}"
             )
             
+            # 注意：这里使用 ["..."] 来处理 Mermaid 中的换行符
             mermaid_code += f'    {node_id}["{label}"]\n'
             
             class_name = VisualizationAdapter._get_mermaid_style_class(node.current_status)

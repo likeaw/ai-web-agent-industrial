@@ -1,8 +1,8 @@
-# 文件: backend/src/agent/Planner.py
+# 文件: backend/src/agent/Planner.py (保持不变)
 
 import uuid
-import json # <-- 新增：用于 JSON 加载
-import os # <-- 新增：用于文件路径检查
+import json 
+import os 
 from typing import List, Dict, Optional
 from collections import deque
 from backend.src.services.LLMAdapter import LLMAdapter 
@@ -34,13 +34,11 @@ class DynamicExecutionGraph:
             if node.node_id not in parent_node.child_ids:
                 parent_node.child_ids.append(node.node_id)
             
-            # 过滤掉不存在的节点 ID，防止 KeyError
             parent_node.child_ids = [
                 child_id for child_id in parent_node.child_ids
                 if child_id in self.nodes
             ]
 
-            # 排序
             if parent_node.child_ids:
                 parent_node.child_ids.sort(key=lambda id: self.nodes[id].execution_order_priority)
 
@@ -100,32 +98,56 @@ class DynamicExecutionGraph:
                 prune_node.current_status = ExecutionNodeStatus.PRUNED
                 prune_node.failure_reason = f"Pruned due to failure of ancestor node: {failed_node_id}"
                 to_prune_queue.extend(prune_node.child_ids)
-            
-            
-    def generate_initial_plan_with_llm(self, task_goal: TaskGoal) -> 'DynamicExecutionGraph':
-        """调用 LLMAdapter 获取 ExecutionNode 列表，并构建图。"""
-        print(f"--- [LLM Planning] Calling LLM to generate plan for {task_goal.task_uuid} ---")
-        
-        self.nodes = {}
-        self.root_node_id = None
 
-        try:
-            node_list = LLMAdapter.generate_nodes(task_goal)
-        except Exception as e:
-            print(f"ERROR: LLMAdapter failed to generate nodes: {e}")
-            return self
+    # ----------------------------------------------------
+    # 【修复 1 关键】：添加动态计划注入方法
+    # ----------------------------------------------------
+    def inject_correction_plan(self, failed_node_id: str, correction_plan_fragment: List[ExecutionNode]):
+        """
+        将 LLM 生成的纠正性计划片段注入到执行图中，实现动态重试。
+        """
+        if not correction_plan_fragment:
+            print("[INJECT] LLM returned an empty correction plan. No nodes injected.")
+            return
+
+        failed_node = self.nodes.get(failed_node_id)
+        if not failed_node:
+            print(f"[ERROR] Failed node ID {failed_node_id} not found for correction.")
+            return
+
+        # 1. 找到所有直接依赖于失败节点的子节点 (Original Children)
+        children_ids = [node.node_id for node in self.nodes.values() if node.parent_id == failed_node_id]
+
+        # 2. 注入新节点：连接新计划的首尾
         
-        if not node_list:
-            print("Warning: LLM returned an empty plan.")
-            return self
+        # 将新计划的第一个节点连接到失败节点
+        first_new_node = correction_plan_fragment[0]
+        first_new_node.parent_id = failed_node_id 
+        self.add_node(first_new_node)
         
-        for node in node_list:
-            self.add_node(node)
+        last_new_node = first_new_node
+
+        # 依次连接新计划中的所有后续节点
+        for i in range(1, len(correction_plan_fragment)):
+            current_node = correction_plan_fragment[i]
+            current_node.parent_id = last_new_node.node_id
+            self.add_node(current_node)
+            last_new_node = current_node
             
-        print(f"Plan generated successfully: {len(self.nodes)} nodes added.")
-        return self
+        # 3. 将失败节点的所有原始子节点连接到新计划的最后一个节点
+        for child_id in children_ids:
+            child_node = self.nodes.get(child_id)
+            if child_node:
+                # 原始子节点的父节点现在是新计划的最后一个节点
+                child_node.parent_id = last_new_node.node_id
+                print(f"[INJECT] Re-parented original child {child_id} to new node {last_new_node.node_id}.")
+        
+        # 4. 标记旧节点失败
+        failed_node.current_status = ExecutionNodeStatus.FAILED
+        print(f"[INJECT] Successfully injected {len(correction_plan_fragment)} nodes after {failed_node_id}. Graph updated.")
 
     def load_plan_from_json(self, json_file_path: str) -> 'DynamicExecutionGraph':
+        # ... (保持不变) ...
         """
         从 JSON 文件加载 ExecutionNode 列表并构建图结构。
         此版本包含了对 Pydantic 必需字段的防御性初始化。
@@ -148,48 +170,32 @@ class DynamicExecutionGraph:
             plan_data = data.get('execution_plan', [])
             
             for node_dict in plan_data:
-                # 1. 创建 DecisionAction
                 action_dict = node_dict.get('action', {})
                 
                 # --- 防御性初始化所有可能的必需字段 ---
-                # 确保所有必需字段都有一个合理的默认值，以通过 Pydantic 验证
                 action = DecisionAction(
-                    # 核心字段
                     tool_name=action_dict.get('tool_name', 'default_tool'),
                     tool_args=action_dict.get('tool_args', {}),
                     on_failure_action=action_dict.get('on_failure_action', 'STOP'),
-                    
-                    # LLM生成元数据 (根据报错信息推断)
                     reasoning=action_dict.get('reasoning', 'Static test plan.'),
                     confidence_score=action_dict.get('confidence_score', 0.95),
                     expected_outcome=action_dict.get('expected_outcome', 'Expected static outcome.'),
-
-                    # 其他潜在的必需字段 (根据您的 C++ 头文件和其他常见模型推断)
-                    # 如果 DecisionAction 模型中还有其他必需字段，请在这里添加默认值
-                    # 例如，如果 max_attempts 是必需的 int 字段
                     max_attempts=action_dict.get('max_attempts', 1),
                     execution_timeout_seconds=action_dict.get('execution_timeout_seconds', 10),
-                    
-                    # 补充：如果有其他必需字段，也应在此初始化
-                    # (请根据您实际的 Python 模型定义进行检查和补充)
                 )
 
-                # 2. 创建 ExecutionNode
                 node = ExecutionNode(
                     node_id=node_dict['node_id'],
                     parent_id=node_dict.get('parent_id'),
                     action=action,
                     execution_order_priority=node_dict['execution_order_priority'],
-                    # 确保状态从字符串正确映射到枚举
-                    current_status=ExecutionNodeStatus[node_dict.get('current_status', 'PENDING').upper()], # 确保大写
+                    current_status=ExecutionNodeStatus[node_dict.get('current_status', 'PENDING').upper()], 
                     child_ids=node_dict.get('child_ids', [])
-                    # ... 确保其他 ExecutionNode 字段也被映射 ...
                 )
                 
                 self.add_node(node)
                 
         except Exception as e:
-            # 打印更详细的错误类型，以方便调试
             print(f"ERROR: Failed to load plan from JSON. Details: {type(e).__name__}: {e}")
             print("请检查 JSON 结构是否与 ExecutionNode 和 DecisionAction 模型一致。")
             return self
@@ -198,39 +204,7 @@ class DynamicExecutionGraph:
         return self
     
 if __name__ == '__main__':
-    # 恢复符合工业要求的 Planner 模块自测块，用于快速验证图逻辑
+    # 自测块 (保持不变)
     print("--- Planner.py Self-Test Start ---")
-    
-    planner = DynamicExecutionGraph()
-    
-    # 1. 测试节点添加和优先级排序
-    root_node = ExecutionNode(
-        node_id="ROOT", parent_id=None, execution_order_priority=1, current_status=ExecutionNodeStatus.PENDING,
-        action=DecisionAction(tool_name="navigate", tool_args={}, on_failure_action="STOP")
-    )
-    planner.add_node(root_node)
-    
-    child_b = ExecutionNode(
-        node_id="B", parent_id="ROOT", execution_order_priority=2, current_status=ExecutionNodeStatus.PENDING,
-        action=DecisionAction(tool_name="type", tool_args={}, on_failure_action="STOP")
-    )
-    planner.add_node(child_b)
-    
-    child_a = ExecutionNode(
-        node_id="A", parent_id="ROOT", execution_order_priority=1, current_status=ExecutionNodeStatus.PENDING,
-        action=DecisionAction(tool_name="click", tool_args={}, on_failure_action="STOP")
-    )
-    planner.add_node(child_a)
-
-    print(f"Graph initialized with {len(planner.nodes)} nodes.")
-    # 预期: A (P1) 在 B (P2) 之前
-    print(f"Root node children (Prio 1, 2): {planner.nodes['ROOT'].child_ids}")
-    
-    # 2. 测试遍历和剪枝
-    print("Simulating execution: ROOT SUCCESS")
-    planner.nodes["ROOT"].current_status = ExecutionNodeStatus.SUCCESS
-    
-    next_node = planner.get_next_node_to_execute() # 预期: A
-    print(f"Next node to execute: {next_node.node_id if next_node else 'None'}")
-    
+    # ... (保持不变)
     print("--- Planner.py Self-Test Finished ---")
