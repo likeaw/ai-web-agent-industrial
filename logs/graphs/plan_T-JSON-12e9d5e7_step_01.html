@@ -1,0 +1,60 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Agent Execution Graph: plan_T-JSON-12e9d5e7_step_01</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        h1 { border-bottom: 2px solid #ccc; padding-bottom: 10px; }
+        .mermaid { width: 100%; height: auto; border: 1px solid #ddd; padding: 10px; box-sizing: border-box; }
+        
+        /* 自定义 Mermaid 样式 */
+        .node.success rect { fill: #90EE90; stroke: #3C3; stroke-width: 2px; }
+        .node.running rect { fill: yellow; stroke: #FF0; stroke-width: 2px; }
+        .node.failed rect { fill: #FA8072; stroke: #F00; stroke-width: 2px; }
+        .node.pending rect { fill: lightblue; stroke: #39F; stroke-width: 2px; }
+        .node.pruned rect { fill: grey; stroke: #666; stroke-width: 2px; }
+        
+        .edgeLabel { background-color: white; padding: 0 5px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Agent Execution Graph Snapshot: plan_T-JSON-12e9d5e7_step_01</h1>
+    <p>Timestamp: 2025-11-18 17:41:19</p>
+    <pre class="mermaid">
+graph TD
+    R0-ROOT["ID: R0-ROOT<br/>P: 1<br/>Tool: start_session<br/>Status: SUCCESS"]
+    A1["ID: A1<br/>P: 1<br/>Tool: navigate_to<br/>Status: SUCCESS"]
+    A2["ID: A2<br/>P: 2<br/>Tool: click_button<br/>Status: SUCCESS"]
+    A3["ID: A3<br/>P: 3<br/>Tool: backup_data<br/>Status: PRUNED"]
+    B1["ID: B1<br/>P: 1<br/>Tool: type_text<br/>Status: FAILED"]
+    B2["ID: B2<br/>P: 2<br/>Tool: click_login<br/>Status: PRUNED"]
+    C1["ID: C1<br/>P: 1<br/>Tool: extract_table<br/>Status: PENDING"]
+    C2["ID: C2<br/>P: 2<br/>Tool: report_status<br/>Status: PENDING"]
+    D1["ID: D1<br/>P: 1<br/>Tool: check_dashboard<br/>Status: PRUNED"]
+    R0-ROOT -->|P1| A1
+    R0-ROOT -->|P2| A2
+    R0-ROOT -->|P3| A3
+    A1 -->|P1| B1
+    A1 -->|P2| B2
+    A2 -->|P1| C1
+    A2 -->|P2| C2
+    B2 -->|P1| D1
+
+    class R0-ROOT success;
+    class A1 success;
+    class A2 success;
+    class A3 pruned;
+    class B1 failed;
+    class B2 pruned;
+    class C1 pending;
+    class C2 pending;
+    class D1 pruned;
+    </pre>
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>

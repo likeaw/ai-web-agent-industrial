@@ -1,0 +1,53 @@
+{
+    "execution_plan": [{
+            "node_id": "NAV_TO_BAIDU",
+            "parent_id": null,
+            "execution_order_priority": 1,
+            "current_status": "PENDING",
+            "action": {
+                "tool_name": "navigate_to",
+                "tool_args": {
+                    "url": "https://www.baidu.com"
+                },
+                "reasoning": "导航到百度主页。",
+                "confidence_score": 1.0,
+                "expected_outcome": "百度首页应成功加载。",
+                "on_failure_action": "STOP_TASK"
+            }
+        },
+        {
+            "node_id": "TYPE_AND_SUBMIT",
+            "parent_id": "NAV_TO_BAIDU",
+            "execution_order_priority": 1,
+            "current_status": "PENDING",
+            "action": {
+                "tool_name": "type_text",
+                "tool_args": {
+                    "selector": "input[name=\"wd\"]",
+                    "text": "合肥工业大学",
+                    "submit_key": "Enter"
+                },
+                "reasoning": "在搜索框输入关键词，并模拟人类操作，按下 Enter 键提交搜索。",
+                "confidence_score": 1.0,
+                "expected_outcome": "页面应跳转到搜索结果页。",
+                "on_failure_action": "STOP_TASK"
+            }
+        },
+        {
+            "node_id": "OBSERVE_RESULT",
+            "parent_id": "TYPE_AND_SUBMIT",
+            "execution_order_priority": 1,
+            "current_status": "PENDING",
+            "action": {
+                "tool_name": "wait",
+                "tool_args": {
+                    "duration": 3
+                },
+                "reasoning": "等待 3 秒，确保结果页稳定加载，并允许 Agent 抓取最终的 WebObservation。",
+                "confidence_score": 0.95,
+                "expected_outcome": "观察到搜索结果页。",
+                "on_failure_action": "RE_EVALUATE"
+            }
+        }
+    ]
+}
