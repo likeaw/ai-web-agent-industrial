@@ -1,5 +1,6 @@
 {
-    "execution_plan": [{
+    "execution_plan": [
+        {
             "node_id": "NAV_TO_BAIDU",
             "parent_id": null,
             "execution_order_priority": 1,
@@ -43,10 +44,28 @@
                 "tool_args": {
                     "duration": 3
                 },
-                "reasoning": "等待 3 秒，确保结果页稳定加载，并允许 Agent 抓取最终的 WebObservation。",
-                "confidence_score": 0.95,
-                "expected_outcome": "观察到搜索结果页。",
+                "reasoning": "等待页面稳定，以便进行下一步操作。",
+                "confidence_score": 0.8,
+                "expected_outcome": "页面加载完成。",
                 "on_failure_action": "RE_EVALUATE"
+            }
+        },
+        {
+            "node_id": "EXTRACT_DATA",
+            "parent_id": "OBSERVE_RESULT",
+            "execution_order_priority": 1,
+            "current_status": "PENDING",
+            "action": {
+                "tool_name": "extract_data",
+                "tool_args": {
+                    "selector": ".result",
+                    "attribute": "text",
+                    "limit": 5
+                },
+                "reasoning": "提取前5条搜索结果的文本内容。",
+                "confidence_score": 1.0,
+                "expected_outcome": "应返回一个包含5条结果文本的列表。",
+                "on_failure_action": "STOP_TASK"
             }
         }
     ]

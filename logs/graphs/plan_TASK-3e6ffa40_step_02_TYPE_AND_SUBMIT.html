@@ -1,0 +1,42 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Agent Execution Graph: plan_TASK-3e6ffa40_step_02_TYPE_AND_SUBMIT</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        h1 { border-bottom: 2px solid #ccc; padding-bottom: 10px; }
+        .mermaid { width: 100%; height: auto; border: 1px solid #ddd; padding: 10px; box-sizing: border-box; }
+        
+        /* 自定义 Mermaid 样式 */
+        .node.success rect { fill: #90EE90; stroke: #3C3; stroke-width: 2px; }
+        .node.running rect { fill: yellow; stroke: #FF0; stroke-width: 2px; }
+        .node.failed rect { fill: #FA8072; stroke: #F00; stroke-width: 2px; }
+        .node.pending rect { fill: lightblue; stroke: #39F; stroke-width: 2px; }
+        .node.pruned rect { fill: grey; stroke: #666; stroke-width: 2px; }
+        
+        .edgeLabel { background-color: white; padding: 0 5px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Agent Execution Graph Snapshot: plan_TASK-3e6ffa40_step_02_TYPE_AND_SUBMIT</h1>
+    <p>Timestamp: 2025-11-28 10:31:04</p>
+    <pre class="mermaid">
+graph TD
+    NAV_TO_BAIDU["ID: NAV_TO_BAIDU<br/>P: 1<br/>Tool: navigate_to<br/>Status: SUCCESS"]
+    TYPE_AND_SUBMIT["ID: TYPE_AND_SUBMIT<br/>P: 1<br/>Tool: type_text<br/>Status: SUCCESS"]
+    OBSERVE_RESULT["ID: OBSERVE_RESULT<br/>P: 1<br/>Tool: wait<br/>Status: PENDING"]
+    NAV_TO_BAIDU -->|P1| TYPE_AND_SUBMIT
+    TYPE_AND_SUBMIT -->|P1| OBSERVE_RESULT
+
+    class NAV_TO_BAIDU success;
+    class TYPE_AND_SUBMIT success;
+    class OBSERVE_RESULT pending;
+    </pre>
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>
