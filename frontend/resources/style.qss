@@ -1,0 +1,49 @@
+/* 文件: frontend/resources/style.qss */
+QWidget {
+    background-color: #2e3436; /* 深灰背景 */
+    color: #eeeeec;            /* 浅灰文字 */
+    font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+    font-size: 14px;
+}
+
+QMainWindow {
+    border: 1px solid #555753;
+}
+
+QLineEdit {
+    background-color: #1e2124;
+    border: 1px solid #555753;
+    padding: 8px;
+    border-radius: 6px;
+}
+
+QPushButton {
+    background-color: #729fcf; /* 蓝色高亮 */
+    color: #2e3436;
+    border: none;
+    padding: 8px 15px;
+    border-radius: 6px;
+    font-weight: bold;
+    min-width: 80px;
+}
+
+QPushButton:hover {
+    background-color: #3465a4;
+}
+
+QTextEdit, QWebEngineView {
+    border: 1px solid #555753;
+}
+
+/* 日志输出区，模拟终端效果 */
+#LogOutputArea { 
+    background-color: #000000; 
+    color: #cc0; /* 默认琥珀色字体 */
+    font-family: 'Consolas', 'Monospace';
+    padding: 5px;
+}
+
+/* 分隔器手柄 */
+QSplitter::handle {
+    background-color: #4e4e4e;
+}

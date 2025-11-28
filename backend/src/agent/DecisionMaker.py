@@ -4,7 +4,8 @@ import time
 import uuid
 import os
 import sys
-from typing import Optional
+import asyncio # 新增: 引入异步库
+from typing import Optional, Callable, Awaitable, Dict, Any, List # 新增: 异步和字典类型提示
 from dotenv import load_dotenv
 
 # --- 核心模块引入 ---
@@ -33,15 +34,21 @@ class DecisionMaker:
     4. 可视化审计：在每一步操作后生成状态快照。
     """
 
-    def __init__(self, task_goal: TaskGoal, headless: bool = True):
+    def __init__(self, 
+                 task_goal: TaskGoal, 
+                 # 新增: 异步回调函数，用于推送状态给前端
+                 status_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None, 
+                 headless: bool = True):
         """
         初始化决策引擎。
         
         :param task_goal: 任务目标对象。
+        :param status_callback: 异步回调函数，用于推送状态给前端。
         :param headless: 浏览器运行模式。生产环境通常为 True，调试环境可配置为 False。
         """
         self.task_goal = task_goal
         self.headless = headless
+        self.status_callback = status_callback # 保存回调函数
         
         # 初始化组件
         self.planner = DynamicExecutionGraph()
@@ -51,6 +58,33 @@ class DecisionMaker:
         self.is_running = False
         self.current_node: Optional[ExecutionNode] = None
         self.execution_counter = 0 
+        
+        # 线程环境下的事件循环 (在 run() 中初始化)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+    # --- 新增: 状态报告方法 (封装线程安全调用) ---
+    def _report_status(self, data: Dict[str, Any]):
+        """
+        内部方法：安全地在 DecisionMaker 线程中调用异步回调函数。
+        这个方法将任务提交给主线程的事件循环，并阻塞等待完成。
+        """
+        if self.status_callback and self._loop:
+            # 确保包含任务ID
+            data["task_id"] = self.task_goal.task_uuid
+            
+            # 使用 run_coroutine_threadsafe 提交到主事件循环
+            future = asyncio.run_coroutine_threadsafe(self.status_callback(data), self._loop)
+            try:
+                # 阻塞直到回调完成 (确保前端收到状态)
+                future.result(timeout=5) # 设置超时，避免死锁
+            except Exception as e:
+                # 打印警告，但允许 Agent 继续执行
+                print(f"[WARN] Failed to broadcast status via callback: {type(e).__name__}: {e}")
+        elif self.status_callback and not self._loop:
+            # 这种情况不应该发生，除非 run() 没有正确初始化 _loop
+            print("[WARN] Callback is set but event loop is missing. Cannot report status.")
+
 
     def _init_browser(self):
         """延迟初始化浏览器资源，仅在 run 开始时调用。"""
@@ -58,14 +92,32 @@ class DecisionMaker:
             try:
                 print(f"--- [System] Initializing BrowserService (Headless: {self.headless}) ---")
                 self.browser_service = BrowserService(headless=self.headless)
+                # 新增状态报告
+                self._report_status({
+                    "type": "STATUS", 
+                    "message": "BrowserService initialized successfully.", 
+                    "level": "INFO"
+                })
             except Exception as e:
                 print(f"!!! [CRITICAL] Failed to initialize BrowserService: {e}")
+                # 新增错误报告
+                self._report_status({
+                    "type": "STATUS", 
+                    "message": f"Browser initialization failed: {str(e)}", 
+                    "level": "ERROR"
+                })
                 raise RuntimeError("Browser initialization failed.") from e
 
     def close(self):
         """资源清理钩子，确保浏览器进程不残留。"""
         if self.browser_service:
             print("--- [System] Closing BrowserService ---")
+            # 新增状态报告
+            self._report_status({
+                "type": "STATUS", 
+                "message": "BrowserService closing.", 
+                "level": "INFO"
+            })
             try:
                 self.browser_service.close()
             except Exception as e:
@@ -80,6 +132,16 @@ class DecisionMaker:
         self.execution_counter += 1
         # 结构化日志
         print(f"\n>>> [STEP {self.execution_counter}] Executing Tool: [{action.tool_name}]")
+        
+        # 新增: 节点 RUNNING 状态报告
+        self._report_status({
+            "type": "NODE_UPDATE",
+            "node_id": self.current_node.node_id if self.current_node else "N/A",
+            "status": ExecutionNodeStatus.RUNNING.value,
+            "tool": action.tool_name,
+            "reasoning": action.reasoning,
+            "message": f"Executing tool: {action.tool_name}"
+        })
         
         if not self.browser_service:
             raise RuntimeError("BrowserService is not initialized.")
@@ -100,6 +162,14 @@ class DecisionMaker:
             
         except Exception as e:
             print(f"!!! [CRITICAL] Unhandled Exception in Action Execution: {e}")
+            
+            # 新增: 报告执行时致命错误
+            self._report_status({
+                "type": "STATUS",
+                "message": f"Critical execution error during action: {str(e)}",
+                "level": "ERROR"
+            })
+            
             # 返回兜底的失败观测，防止程序崩溃，允许 Planner 尝试恢复
             return WebObservation(
                 current_url="unknown",
@@ -116,7 +186,6 @@ class DecisionMaker:
         """
         处理执行结果：成功则继续，失败则触发 LLM 动态重规划 (Self-Correction)。
         """
-        # [修改点 1] 直接赋值，现在 ExecutionNode 中已包含 last_observation 字段
         node.last_observation = observation # 存储最新的观测，用于可视化和重规划
 
         feedback = observation.last_action_feedback
@@ -128,24 +197,57 @@ class DecisionMaker:
         if feedback.status == 'SUCCESS':
             node.current_status = ExecutionNodeStatus.SUCCESS
             print(f"    [PLAN] Node {node.node_id} COMPLETED. Graph updated.")
+            
+            # 新增: 报告节点 SUCCESS 状态
+            self._report_status({
+                "type": "NODE_UPDATE",
+                "node_id": node.node_id,
+                "status": ExecutionNodeStatus.SUCCESS.value,
+                "tool": node.action.tool_name,
+                "url": observation.current_url,
+                "result": feedback.message
+            })
             return True
         
         # 2. 失败情况处理
         print(f"!!! [FAILURE] Node {node.node_id} failed. Reason: {feedback.message}")
+        
+        # 新增: 报告节点 FAILED 状态 (在重规划前报告，确保状态被捕获)
+        self._report_status({
+            "type": "NODE_UPDATE",
+            "node_id": node.node_id,
+            "status": ExecutionNodeStatus.FAILED.value,
+            "tool": node.action.tool_name,
+            "url": observation.current_url,
+            "error_message": feedback.message
+        })
+
         self.planner.prune_on_failure(node.node_id, feedback.message)
         
-        # 检查节点的失败策略
+        # 检查节点的失败策略 (RE_EVALUATE 逻辑保持不变)
         if node.action.on_failure_action == "STOP_TASK":
             print(f"!!! Strategy is STOP_TASK. Halting execution.")
             node.current_status = ExecutionNodeStatus.FAILED
+            # 报告停止状态
+            self._report_status({
+                "type": "STATUS",
+                "message": f"Task stopped due to STOP_TASK failure strategy on node {node.node_id}.",
+                "level": "ERROR"
+            })
             return False
             
         elif node.action.on_failure_action == "RE_EVALUATE":
             print(f"--- [RE-PLANNING] Initiating Dynamic Correction for Node {node.node_id} ---")
             
-            # A. 构造纠错上下文
-            # 我们创建一个临时的 Goal，明确告诉 LLM 发生了什么错误
-            correction_goal = self.task_goal.model_copy() # 需要 Pydantic 的 copy 方法
+            # 报告重规划开始
+            self._report_status({
+                "type": "STATUS",
+                "message": f"Initiating dynamic re-evaluation for node {node.node_id}.",
+                "level": "WARNING"
+            })
+
+            # A. 构造纠错上下文 (保持不变)
+            correction_goal = self.task_goal.model_copy() 
             correction_goal.target_description = (
                 f"ORIGINAL GOAL: {self.task_goal.target_description}\n"
                 f"CONTEXT: The step '{node.action.tool_name}' FAILED.\n"
@@ -153,23 +255,28 @@ class DecisionMaker:
                 f"TASK: Generate a short corrective plan (1-3 steps) to fix this error and achieve the original goal."
             )
             
-            # B. 调用 LLM 生成纠错片段
-            # 注意：传入当前的 observation，这样 LLM 可以看到报错后的页面状态
+            # B. 调用 LLM 生成纠错片段 (保持不变)
             try:
                 print(f"    [LLM] Requesting correction plan...")
-                correction_nodes = LLMAdapter.generate_nodes(correction_goal, observation)
+                correction_nodes: List[ExecutionNode] = LLMAdapter.generate_nodes(correction_goal, observation)
                 
                 if correction_nodes:
-                    # C. 注入新计划
+                    # C. 注入新计划 (保持不变)
                     print(f"    [PLAN] Injecting {len(correction_nodes)} correction nodes...")
                     self.planner.inject_correction_plan(node.node_id, correction_nodes)
-                    return True # 继续执行循环，下次会取到新注入的节点
+                    return True 
                 else:
                     print("    [LLM] Returned empty correction plan. Cannot recover.")
                     return False
                     
             except Exception as e:
                 print(f"    [ERROR] Re-planning failed: {e}")
+                # 报告重规划失败
+                self._report_status({
+                    "type": "STATUS",
+                    "message": f"Re-planning failed after node {node.node_id}: {str(e)}",
+                    "level": "ERROR"
+                })
                 return False
                 
         # 默认处理
@@ -177,38 +284,46 @@ class DecisionMaker:
         return True
 
     def _save_visualization(self, suffix: str):
-        """生成可视化快照"""
+        """生成可视化快照，并向 WebSocket 推送 HTML 内容。"""
         filename = f"plan_{self.task_goal.task_uuid}_{suffix}"
+        
         try:
             # 渲染图
             output_dir = 'logs/graphs'
             os.makedirs(output_dir, exist_ok=True)
             content = VisualizationAdapter.render_graph_to_html_string(self.planner, filename)
             
-            # 写入文件
+            # 写入文件 (保留原有的文件保存逻辑)
             with open(os.path.join(output_dir, f"{filename}.html"), 'w', encoding='utf-8') as f:
                 f.write(content)
+                
+            # 新增: 推送可视化 HTML 给前端
+            self._report_status({
+                "type": "VISUALIZATION",
+                "html": content,
+                "level": "REPORT"
+            })
+            
         except Exception as e:
             print(f"[WARN] Visualization failed: {e}")
+            self._report_status({
+                "type": "STATUS",
+                "message": f"Visualization generation failed: {str(e)}",
+                "level": "WARNING"
+            })
 
     def _resolve_dynamic_args(self, node: ExecutionNode) -> DecisionAction:
-        """
-        动态参数替换方法：将 {result_of:NODE_ID} 模式替换为实际的执行结果。
-        此方法在执行前调用，处理动态依赖。
-        """
+        """动态参数替换方法 (保持不变)"""
         resolved_args = node.action.tool_args.copy()
         
-        # 遍历所有参数，检查是否包含动态引用
         for key, value in node.action.tool_args.items():
             if isinstance(value, str) and value.startswith("{result_of:") and value.endswith("}"):
                 source_node_id = value[len("{result_of:"):-1]
                 
-                # 检查源节点是否存在且已执行成功
                 source_node = self.planner.nodes.get(source_node_id)
                 if not source_node or source_node.current_status != ExecutionNodeStatus.SUCCESS:
                     raise ValueError(f"Dynamic argument source node '{source_node_id}' not found or not successful (Status: {source_node.current_status.name if source_node else 'Not Found'}).")
                 
-                # 从源节点中获取捕获的结果 (使用 resolved_output 属性)
                 resolved_value = source_node.resolved_output
                 if resolved_value is None:
                     raise ValueError(f"Dynamic argument source node '{source_node_id}' succeeded but has no captured output ('resolved_output').")
@@ -216,7 +331,6 @@ class DecisionMaker:
                 resolved_args[key] = resolved_value
                 print(f"--- [RESOLVE] Replaced '{value}' with captured output for '{key}'.")
         
-        # 返回一个新的 DecisionAction 实例
         return DecisionAction(
             tool_name=node.action.tool_name,
             tool_args=resolved_args,
@@ -230,20 +344,26 @@ class DecisionMaker:
         )
 
     def _generate_execution_summary(self):
-        """生成详细的执行报告，包括节点的最终状态和提取的结果。"""
+        """生成详细的执行报告 (保持原有的打印逻辑，并新增报告开始/结束状态)"""
+        
+        # 新增: 报告任务总结开始
+        self._report_status({
+            "type": "STATUS",
+            "message": "Generating final execution summary report...",
+            "level": "REPORT"
+        })
+        
+        # (原有的打印逻辑保持不变)
         print("\n==================================================")
         print("          ✨ 任务执行总结报告 ✨")
         print("==================================================")
         
-        # 统计结果
         total_nodes = len(self.planner.nodes)
         successful_nodes = 0
         
-        # 遍历所有节点并打印信息
         for node_id in self.planner.nodes_execution_order:
             node = self.planner.nodes[node_id]
             
-            # 颜色化状态
             status_map = {
                 ExecutionNodeStatus.SUCCESS: "\033[92mSUCCESS\033[0m", # 绿色
                 ExecutionNodeStatus.FAILED: "\033[91mFAILED\033[0m",   # 红色
@@ -258,18 +378,14 @@ class DecisionMaker:
                 f"Tool: {node.action.tool_name}",
             ]
             
-            # [修改点 2] 直接访问 resolved_output 属性
             resolved_output = node.resolved_output
             if resolved_output is not None:
-                # 打印前80字符，并使用青色突出显示结果
                 summary_parts.append(f"Output: \033[96m{resolved_output[:80]}{'...' if len(resolved_output) > 80 else ''}\033[0m") 
             
-            # 检查是否有失败信息
             if node.current_status == ExecutionNodeStatus.FAILED and node.last_observation and node.last_observation.last_action_feedback:
                 feedback = node.last_observation.last_action_feedback
                 summary_parts.append(f"Error: \033[91m{feedback.error_code} - {feedback.message[:80]}{'...' if len(feedback.message) > 80 else ''}\033[0m")
             
-            # 统计成功节点
             if node.current_status == ExecutionNodeStatus.SUCCESS:
                 successful_nodes += 1
 
@@ -278,52 +394,86 @@ class DecisionMaker:
         print("==================================================")
         print(f"总节点数: {total_nodes} | 成功节点数: {successful_nodes}")
         print("==================================================")
+        
+        # 新增: 报告任务总结完成
+        self._report_status({
+            "type": "STATUS",
+            "message": f"Summary generated: {successful_nodes}/{total_nodes} nodes successful.",
+            "level": "REPORT"
+        })
 
     def run(self):
         """主执行循环"""
+        
+        # --- 核心修改: 线程事件循环初始化 ---
+        try:
+            # 尝试获取当前线程的事件循环（如果 DecisionMaker 是在 asyncio.run 中启动的）
+            self._loop = asyncio.get_event_loop()
+        except RuntimeError:
+            # 如果是 threading.Thread 启动，创建一个新的事件循环
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            
         self.is_running = True
         self._init_browser()
         
+        # 新增: 报告任务启动状态
+        self._report_status({
+            "type": "STATUS",
+            "message": f"Agent starting execution loop for: {self.task_goal.target_description}",
+            "level": "INFO"
+        })
+        
         try:
             # 1. 规划阶段 (Planning Phase)
-            # 只有当计划为空时，才请求 LLM。支持 "Human-in-the-loop" 或 "Pre-loaded Plan" 模式。
+            # ... 保持不变 ...
             if not self.planner.nodes:
                 print("\n--- Phase 1: Dynamic Planning (LLM) ---")
+                
+                # 新增: 报告规划开始
+                self._report_status({
+                    "type": "STATUS",
+                    "message": "Starting LLM dynamic planning phase...",
+                    "level": "INFO"
+                })
+
                 self.planner.generate_initial_plan_with_llm(self.task_goal)
             else:
                 print("\n--- Phase 1: Static Plan Loaded (Skipping LLM) ---")
             
-            # 保存初始计划快照
+            # 保存初始计划快照 (现在会触发 WebSocket 推送)
             self._save_visualization("00_initial_plan")
             
             if not self.planner.nodes:
                 print("[ERROR] Execution halted: Plan is empty after initialization.")
+                # 新增: 报告空计划错误
+                self._report_status({
+                    "type": "STATUS",
+                    "message": "Execution halted: Plan is empty after initialization.",
+                    "level": "ERROR"
+                })
                 return
 
             # 2. 执行阶段 (Execution Phase)
             print("\n--- Phase 2: Execution Loop ---")
             while self.is_running:
                 
-                # 获取下一个可执行节点 (Priority-based DFS)
                 self.current_node = self.planner.get_next_node_to_execute()
                 
                 if self.current_node is None:
                     print("\n[FINISH] No more PENDING nodes. Task completed or path exhausted.")
                     break
                     
-                # 状态流转: PENDING -> RUNNING
                 self.current_node.current_status = ExecutionNodeStatus.RUNNING
 
-                # 动态参数替换 (Dynamic Argument Resolution)
+                # 动态参数替换
                 try:
                     resolved_action = self._resolve_dynamic_args(self.current_node)
-                    # 使用解析后的 action
                     self.current_node.action = resolved_action 
                 except ValueError as e:
-                    # 参数替换失败，节点直接标记为失败
                     print(f"!!! [ERROR] Dynamic Argument Resolution FAILED ({self.current_node.node_id}): {e}")
                     self.current_node.current_status = ExecutionNodeStatus.FAILED
-                    # 构造一个失败的 Observation 来触发正常的失败处理流程
+                    
                     observation = WebObservation(
                         current_url=self.browser_service.page.url if self.browser_service and self.browser_service.page else "unknown",
                         http_status_code=500,
@@ -334,14 +484,23 @@ class DecisionMaker:
                             status="FAILED", error_code="ARG_RESOLVE_ERROR", message=str(e)
                         )
                     )
-                    # [修改点 3] 赋值 last_observation
                     self.current_node.last_observation = observation
+                    
+                    # 报告参数解析失败状态
+                    self._report_status({
+                        "type": "NODE_UPDATE",
+                        "node_id": self.current_node.node_id,
+                        "status": ExecutionNodeStatus.FAILED.value,
+                        "tool": self.current_node.action.tool_name,
+                        "error_message": f"Argument resolution failed: {str(e)}"
+                    })
+                    
                     should_continue = self._handle_execution_result(self.current_node, observation)
                     self._save_visualization(f"step_{self.execution_counter:02d}_{self.current_node.node_id}_FAIL")
                     if not should_continue:
                         self.is_running = False
                         break
-                    continue # 跳过本轮剩余部分，继续下一循环获取下一个节点
+                    continue 
                     
                 # 执行
                 observation = self._execute_action(self.current_node.action)
@@ -349,41 +508,70 @@ class DecisionMaker:
                 # 状态流转: RUNNING -> SUCCESS/FAILED & Pruning
                 should_continue = self._handle_execution_result(self.current_node, observation)
                 
-                # [修改点 4] 结果捕获逻辑：使用直接赋值，因为 resolved_output 现在是模型的一部分。
+                # 结果捕获逻辑
                 if self.current_node.current_status == ExecutionNodeStatus.SUCCESS and observation.last_action_feedback and observation.last_action_feedback.message:
                     self.current_node.resolved_output = observation.last_action_feedback.message
                 
-                # 快照审计
+                # 快照审计 (现在会触发 WebSocket 推送)
                 self._save_visualization(f"step_{self.execution_counter:02d}_{self.current_node.node_id}")
                 
                 if not should_continue:
                     self.is_running = False
                     break
                 
-                # 硬性安全熔断 (防止无限循环)
+                # 硬性安全熔断 
                 if self.execution_counter >= 50:
                     print("[ABORT] Reached max safety iteration limit (50).")
+                    # 新增: 报告熔断状态
+                    self._report_status({
+                        "type": "STATUS",
+                        "message": "Execution aborted: Reached max safety iteration limit (50).",
+                        "level": "ERROR"
+                    })
                     break
                     
         except KeyboardInterrupt:
             print("\n[USER ABORT] Execution interrupted by user.")
+            # 新增: 报告中断状态
+            self._report_status({
+                "type": "STATUS",
+                "message": "Execution interrupted by user.",
+                "level": "WARNING"
+            })
         except Exception as e:
             print(f"\n[FATAL ERROR] Unhandled exception in run loop: {e}")
             import traceback
             traceback.print_exc()
+            # 新增: 报告致命错误
+            self._report_status({
+                "type": "STATUS",
+                "message": f"FATAL ERROR in run loop: {type(e).__name__}: {e}",
+                "level": "ERROR"
+            })
         finally:
             # 任务结束时调用总结报告
             self._generate_execution_summary() 
             
             self.close()
+            
+            # 新增: 报告任务最终完成
+            self._report_status({
+                "type": "STATUS",
+                "message": "Task execution loop finished. System shutdown.",
+                "level": "SUCCESS"
+            })
+            
             print("--- DecisionMaker Terminated ---")
 
 
 # ----------------------------------------------------------------------
-# 工业级入口点 (Entry Point)
+# 工业级入口点 (Entry Point) - 仅保留配置逻辑，移除 run() 调用
 # ----------------------------------------------------------------------
         
 if __name__ == '__main__':
+    # 警告：此入口点仅用于配置测试，在 FastAPI 模式下，DecisionMaker.run() 
+    # 应由 main_server.py 在独立线程中调用。
+    
     # 1. 环境完整性检查
     llm_key = os.getenv("LLM_API_KEY")
     # 定义一个标准测试计划路径
@@ -401,10 +589,10 @@ if __name__ == '__main__':
         target_description="Execute industrial automation task.", 
         priority_level=1,
         max_execution_time_seconds=120,
-        allowed_actions=["navigate_to", "click_element", "type_text", "scroll", "wait", "extract_data", "get_attribute"] # 添加 get_attribute/extract_data 以支持数据流
+        allowed_actions=["navigate_to", "click_element", "type_text", "scroll", "wait", "extract_data", "get_attribute"]
     )
     
-    # 4. 初始化 DecisionMaker
+    # 4. 初始化 DecisionMaker (注意：不传入 status_callback，因为它不需要在此模式下报告)
     is_headless = os.getenv("BROWSER_HEADLESS", "False").lower() == "true"
     maker = DecisionMaker(goal, headless=is_headless)
 
@@ -412,12 +600,11 @@ if __name__ == '__main__':
     print("    AI Web Agent - Industrial Decision Engine")
     print("==================================================")
 
-    # 5. 执行分支 (Strict Branching)
+    # 5. 执行分支 
     if target_json_file:
         print(f"[MODE] Replay/Test Mode")
         print(f"[INFO] Loading static plan from: {target_json_file}")
         
-        # 假设 DynamicExecutionGraph 有 load_plan_from_json 方法
         try:
             maker.planner.load_plan_from_json(target_json_file)
         except AttributeError:
@@ -428,21 +615,20 @@ if __name__ == '__main__':
             print("[FATAL] JSON file loaded but contained no valid nodes. Exiting.")
             sys.exit(1)
             
-        maker.run()
+        # maker.run() # <--- 关键修改：不再在此处运行，而是等待 main_server.py 导入并调用
+
         
     elif llm_key:
         print(f"[MODE] Dynamic Generative Mode")
         print(f"[INFO] LLM API Key detected. Agent will generate plan dynamically.")
         
-        # 在动态模式下，必须有明确的任务描述。
         user_intent = "Go to bing.com and search for 'Industrial AI Agent'"
         print(f"[GOAL] {user_intent}")
         maker.task_goal.target_description = user_intent
         
-        maker.run()
-        
+        # maker.run() # <--- 关键修改：不再在此处运行
+
     else:
-        # 既无 JSON 也无 Key -> 无法运行 -> 报错退出
         print("[FATAL ERROR] System Configuration Incomplete.")
         print("Reason: No 'complex_plan.json' found in data/ AND no 'LLM_API_KEY' in environment.")
         print("Action: Please provide a static plan file OR configure your LLM credentials.")
