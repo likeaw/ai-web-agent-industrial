@@ -120,3 +120,7 @@ class ExecutionNode(BaseModel):
 
     required_precondition: str = Field("True", description="执行此节点前，网页必须达到的状态。")
     expected_cost_units: int = 1 # 预估的资源消耗或时间
+    
+    # === [新增字段] 运行时状态/结果 ===
+    last_observation: Optional[WebObservation] = Field(None, description="此节点执行完毕后的网页观测结果。")
+    resolved_output: Optional[str] = Field(None, description="从WebObservation中提取的关键结果，供后续节点使用。")

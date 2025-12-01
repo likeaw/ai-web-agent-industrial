@@ -16,6 +16,7 @@ class DynamicExecutionGraph:
     def __init__(self):
         self.nodes: Dict[str, ExecutionNode] = {}
         self.root_node_id: Optional[str] = None
+        self.nodes_execution_order: List[str] = []
 
     def add_node(self, node: ExecutionNode):
         """添加节点到图中，并维护父子关系和子节点优先级排序。"""
@@ -23,6 +24,8 @@ class DynamicExecutionGraph:
             print(f"Warning: Node ID {node.node_id} already exists. Overwriting.")
         
         self.nodes[node.node_id] = node
+        if node.node_id not in self.nodes_execution_order:
+            self.nodes_execution_order.append(node.node_id)
         
         if node.parent_id is None:
             if self.root_node_id is not None and self.root_node_id != node.node_id:
@@ -52,8 +55,7 @@ class DynamicExecutionGraph:
         visited = set()
         
         while stack:
-            node_id = stack.popleft() 
-            
+            node_id = stack.popleft()
             if node_id in visited:
                 continue
             visited.add(node_id)
@@ -66,9 +68,10 @@ class DynamicExecutionGraph:
                 if node.execution_order_priority not in pending_nodes_by_priority:
                     pending_nodes_by_priority[node.execution_order_priority] = []
                 pending_nodes_by_priority[node.execution_order_priority].append(node)
-                
-            if node.current_status == ExecutionNodeStatus.SUCCESS:
-                stack.extend(node.child_ids)
+
+            # 始终遍历整棵图（包括 FAILED/PRUNED 节点的子树），
+            # 这样注入到失败节点之后的纠错计划也能被发现并执行。
+            stack.extend(node.child_ids)
 
 
         if not pending_nodes_by_priority:
@@ -146,35 +149,48 @@ class DynamicExecutionGraph:
         failed_node.current_status = ExecutionNodeStatus.FAILED
         print(f"[INJECT] Successfully injected {len(correction_plan_fragment)} nodes after {failed_node_id}. Graph updated.")
 
-    def load_plan_from_json(self, json_file_path: str) -> 'DynamicExecutionGraph':
+    def generate_initial_plan_with_llm(self, task_goal: TaskGoal, observation: Optional[WebObservation] = None):
+        """
+        调用 LLMAdapter 生成初始计划，并写入执行图。
+        """
+        node_candidates = LLMAdapter.generate_nodes(task_goal, observation)
+        if not node_candidates:
+            raise RuntimeError("LLM returned no execution nodes; cannot start plan.")
+
+        # 重置现有图，确保是一次新的执行
+        self.nodes.clear()
+        self.nodes_execution_order.clear()
+        self.root_node_id = None
+
+        for node in node_candidates:
+            self.add_node(node)
+
+    def load_plan_from_json(self, file_path: str) -> 'DynamicExecutionGraph':
         # ... (保持不变) ...
         """
         从 JSON 文件加载 ExecutionNode 列表并构建图结构。
         此版本包含了对 Pydantic 必需字段的防御性初始化。
         """
-        if not os.path.exists(json_file_path):
-            print(f"ERROR: JSON plan file not found at {json_file_path}")
+        if not os.path.exists(file_path):
+            print(f"ERROR: JSON plan file not found at {file_path}")
             return self
 
         try:
-            with open(json_file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"ERROR: Failed to decode JSON file. Details: {e}")
-            return self
-
-        self.nodes = {}
-        self.root_node_id = None
-
-        try:
-            plan_data = data.get('execution_plan', [])
+        
+            raw_node_list = data.get("execution_plan", [])
             
-            for node_dict in plan_data:
+            # 清空并重建执行顺序列表
+            self.nodes_execution_order = [] 
+            self.nodes = {} 
+
+            for node_dict in raw_node_list:
+                # 实例化 DecisionAction
                 action_dict = node_dict.get('action', {})
-                
-                # --- 防御性初始化所有可能的必需字段 ---
+                # ... (DecisionAction 实例化逻辑保持不变)
                 action = DecisionAction(
-                    tool_name=action_dict.get('tool_name', 'default_tool'),
+                    tool_name=action_dict.get('tool_name', 'MISSING_TOOL'),
                     tool_args=action_dict.get('tool_args', {}),
                     on_failure_action=action_dict.get('on_failure_action', 'STOP'),
                     reasoning=action_dict.get('reasoning', 'Static test plan.'),
@@ -184,6 +200,7 @@ class DynamicExecutionGraph:
                     execution_timeout_seconds=action_dict.get('execution_timeout_seconds', 10),
                 )
 
+                # 实例化 ExecutionNode
                 node = ExecutionNode(
                     node_id=node_dict['node_id'],
                     parent_id=node_dict.get('parent_id'),
@@ -194,7 +211,9 @@ class DynamicExecutionGraph:
                 )
                 
                 self.add_node(node)
-                
+                # 确保 nodes_execution_order 包含所有节点 ID
+                # self.add_node 内部已处理 self.nodes_execution_order.append(node.node_id)
+
         except Exception as e:
             print(f"ERROR: Failed to load plan from JSON. Details: {type(e).__name__}: {e}")
             print("请检查 JSON 结构是否与 ExecutionNode 和 DecisionAction 模型一致。")
