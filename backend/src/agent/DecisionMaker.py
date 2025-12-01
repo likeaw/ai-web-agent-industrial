@@ -12,6 +12,11 @@ from dotenv import load_dotenv
 from backend.src.agent.Planner import DynamicExecutionGraph
 from backend.src.services.LLMAdapter import LLMAdapter
 from backend.src.visualization.VisualizationAdapter import VisualizationAdapter
+
+# 工具层（本地工具）
+from backend.src.tools.local_tools import launch_notepad
+# 路径与临时文件管理
+from backend.src.utils.path_utils import build_temp_file_path
 # 引入真实浏览器服务
 from backend.src.services.BrowserService import BrowserService
 
@@ -87,42 +92,51 @@ class DecisionMaker:
                 file_path = action.tool_args.get("file_path")
                 initial_content = action.tool_args.get("initial_content", "")
 
-                if file_path:
-                    target_path = os.path.abspath(file_path)
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                else:
-                    fd, temp_path = tempfile.mkstemp(prefix="agent_note_", suffix=".txt")
-                    os.close(fd)
-                    target_path = temp_path
+                # 统一获取“最近一次提取结果”的文本形式（每行一个标题）
+                titles_text: Optional[str] = None
+                if hasattr(self.planner, "nodes_execution_order"):
+                    from ast import literal_eval
 
-                if initial_content:
-                    with open(target_path, "w", encoding="utf-8") as f:
-                        f.write(initial_content)
+                    for nid in reversed(self.planner.nodes_execution_order):
+                        node = self.planner.nodes.get(nid)
+                        if not node:
+                            continue
+                        if getattr(node, "resolved_output", None):
+                            raw_output = str(node.resolved_output)
+                            if raw_output.startswith("Extracted") and ":" in raw_output:
+                                try:
+                                    list_part = raw_output.split(":", 1)[1].strip()
+                                    titles = literal_eval(list_part)
+                                    if isinstance(titles, list) and titles:
+                                        titles_text = "\n".join(str(t) for t in titles)
+                                    else:
+                                        titles_text = raw_output
+                                except Exception:
+                                    titles_text = raw_output
+                            else:
+                                titles_text = raw_output
+                            print(f"[LOCAL TOOL] Found resolved_output from node {nid} for notepad content.")
+                            break
 
-                try:
-                    # 在 Windows 上启动记事本，且不阻塞当前进程
-                    if sys.platform.startswith("win"):
-                        DETACHED = getattr(os, "DETACHED_PROCESS", 0x00000008)
-                        import subprocess
+                # 逻辑简化：一旦有提取结果，就完全覆盖 initial_content，避免占位符残留
+                if titles_text:
+                    initial_content = titles_text
 
-                        subprocess.Popen(
-                            ["notepad.exe", target_path],
-                            creationflags=DETACHED,
-                        )
-                    else:
-                        print(f"[LOCAL TOOL] open_notepad is only fully supported on Windows. File path: {target_path}")
-
-                    fb = ActionFeedback(
-                        status="SUCCESS",
-                        error_code="0",
-                        message=f"Notepad opened for file: {target_path}",
+                # 统一：所有记事本类临时文件写入到项目根目录 temp/notes 下，按任务主题+时间命名
+                if not file_path:
+                    file_path = build_temp_file_path(
+                        file_type="notes",
+                        task_topic=self.task_goal.target_description,
+                        extension=".txt",
                     )
-                except Exception as exc:
-                    fb = ActionFeedback(
-                        status="FAILED",
-                        error_code="NOTEPAD_LAUNCH_ERROR",
-                        message=f"Failed to open Notepad: {exc}",
-                    )
+
+                target_path, ok, msg = launch_notepad(file_path, initial_content)
+
+                fb = ActionFeedback(
+                    status="SUCCESS" if ok else "FAILED",
+                    error_code="0" if ok else "NOTEPAD_LAUNCH_ERROR",
+                    message=msg,
+                )
 
                 observation = WebObservation(
                     observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -457,10 +471,22 @@ if __name__ == '__main__':
     goal = TaskGoal(
         task_uuid=f"TASK-{str(uuid.uuid4())[:8]}",
         step_id="INIT",
-        target_description="Execute industrial automation task.", 
+        target_description="Execute industrial automation task.",
         priority_level=1,
         max_execution_time_seconds=120,
-        allowed_actions=["navigate_to", "click_element", "type_text", "scroll", "wait", "extract_data", "get_attribute"] # 添加 get_attribute/extract_data 以支持数据流
+        allowed_actions=[
+            "navigate_to",
+            "click_element",
+            "type_text",
+            "scroll",
+            "wait",
+            "extract_data",
+            "get_attribute",
+            "open_notepad",
+            "take_screenshot",
+            "click_nth",
+            "find_link_by_text",
+        ],
     )
     
     # 4. 初始化 DecisionMaker

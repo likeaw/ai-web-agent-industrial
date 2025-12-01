@@ -49,13 +49,16 @@ class LLMAdapter:
         """
         schema_text = json.dumps(json_schema, indent=2)
         
-        # 【新修复点】：加强对定位器参数 (selector) 的要求
+        # 【规划原则】：说明各工具的关键参数约束，帮助 LLM 正确调用。
         planning_principle = (
             "【规划原则】: "
-            "1. type_text 和 click_element 工具**必须**在 tool_args 中提供一个有效的 'selector' 或 'xpath' 字符串来定位元素。"
-            "2. 如果使用 type_text 并指定了 submit_key='Enter'，则不必紧接着执行 click_element 来点击提交按钮。"
-            "3. 对于复杂的、需要动态定位的点击（如搜索结果链接），请使用 on_failure_action: 'RE_EVALUATE'。"
-            "4. 当用户要求记录或整理信息时，可以调用 open_notepad 工具，tool_args 支持 file_path(可选) 和 initial_content(可选)。"
+            "1. type_text 和 click_element 工具**必须**在 tool_args 中提供一个有效的 'selector' 或 'xpath' 字符串来定位元素；"
+            "   对于 type_text，如果指定了 submit_key='Enter'，则不必紧接着执行 click_element 来点击提交按钮。"
+            "2. 对于复杂的、需要动态定位的点击（如搜索结果链接），可以使用 on_failure_action: 'RE_EVALUATE' 让 Agent 自我纠错。"
+            "3. 当用户要求记录或整理信息时，可以调用 open_notepad 工具，tool_args 支持 file_path(可选) 和 initial_content(可选)。"
+            "4. 当需要保存当前页面截图时，请使用 take_screenshot，tool_args 至少包含 task_topic(字符串)，可选 filename 和 full_page(bool)。"
+            "5. 当需要点击搜索结果或重复元素列表中的第 N 个元素时，请使用 click_nth，tool_args 中包含 selector/xpath/text_content 以及 index(从0开始)。"
+            "6. 当需要按文本模糊匹配链接时，请使用 find_link_by_text，tool_args 中包含 keyword(字符串) 和可选 limit(整数，默认5)。"
         )
 
         system_prompt = (

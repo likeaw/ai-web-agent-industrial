@@ -55,8 +55,7 @@ class DynamicExecutionGraph:
         visited = set()
         
         while stack:
-            node_id = stack.popleft() 
-            
+            node_id = stack.popleft()
             if node_id in visited:
                 continue
             visited.add(node_id)
@@ -69,9 +68,10 @@ class DynamicExecutionGraph:
                 if node.execution_order_priority not in pending_nodes_by_priority:
                     pending_nodes_by_priority[node.execution_order_priority] = []
                 pending_nodes_by_priority[node.execution_order_priority].append(node)
-                
-            if node.current_status == ExecutionNodeStatus.SUCCESS:
-                stack.extend(node.child_ids)
+
+            # 始终遍历整棵图（包括 FAILED/PRUNED 节点的子树），
+            # 这样注入到失败节点之后的纠错计划也能被发现并执行。
+            stack.extend(node.child_ids)
 
 
         if not pending_nodes_by_priority:

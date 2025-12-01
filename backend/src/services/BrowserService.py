@@ -9,10 +9,13 @@ from typing import List, Dict, Any, Optional
 from playwright.sync_api import sync_playwright, Page, TimeoutError, Error
 
 # 导入你现有的数据模型
+
 from backend.src.data_models.decision_engine.decision_models import (
     WebObservation, KeyElement, BoundingBox, ActionFeedback, DecisionAction
 )
 
+# 浏览器工具层（单个操作的可扩展实现）
+from backend.src.tools.browser import extract_search_results, take_screenshot, click_nth_match, find_link_by_text
 class BrowserService:
     """
     工业级浏览器适配器 (基于 Playwright)。
@@ -264,37 +267,80 @@ class BrowserService:
             elif action.tool_name == "extract_data":
                 # 参数提取
                 selector = action.tool_args.get("selector")
-                attribute = action.tool_args.get("attribute", "text") # 默认提取元素的文本
-                limit = action.tool_args.get("limit", 1) # 默认只提取1个元素
-                
+                attribute = action.tool_args.get("attribute", "text")  # 默认提取元素的文本
+                limit = action.tool_args.get("limit", 3)  # 默认提取前三条
+
                 if not selector:
-                    raise ValueError("Selector argument is required for extract_data.")
+                    # 回退到通用选择器解析逻辑（支持 xpath / text_content 等）
+                    try:
+                        selector = self._get_selector(action.tool_args)
+                    except Exception:
+                        selector = None
 
-                # 查找所有匹配的元素
-                elements = self.page.locator(selector).all()
-                results = []
-                
-                # 遍历并提取数据
-                for i, element in enumerate(elements):
-                    if i >= limit:
-                        break
-                        
-                    if attribute == "text":
-                        # 提取可见文本
-                        content = element.inner_text()
-                    else:
-                        # 提取指定属性（例如 'href', 'title', 'value'）
-                        content = element.get_attribute(attribute)
-                    
-                    if content is not None:
-                        results.append(content.strip())
+                # 具体提取逻辑委托给 browser_tools，便于单独维护
+                results = extract_search_results(
+                    page=self.page,
+                    current_url=self.page.url,
+                    selector=selector,
+                    attribute=attribute,
+                    limit=limit,
+                )
 
-                # 将结果编码成一个字符串，并作为成功消息返回，以便 DecisionMaker 捕获
-                # 这里使用简单的 JSON 字符串封装以确保格式化
-                # 注意：DecisionMaker.py 依赖于此处的字符串结果
+                if results:
+                    feedback.status = "SUCCESS"
+                    summary = f"Extracted {len(results)} items: {results}"
+                    print(f"[BrowserService] extract_data -> {summary}")
+                    feedback.message = summary
+                else:
+                    feedback.status = "FAILED"
+                    feedback.error_code = "NO_DATA_EXTRACTED"
+                    feedback.message = "extract_data: no items extracted from page."
+                    print("[BrowserService] extract_data -> NO DATA EXTRACTED")
+
+            elif action.tool_name == "take_screenshot":
+                # task_topic 主要用于生成有语义的文件名
+                task_topic = action.tool_args.get("task_topic", "web_page")
+                filename = action.tool_args.get("filename")
+                full_page = bool(action.tool_args.get("full_page", True))
+
+                screenshot_path = take_screenshot(
+                    page=self.page,
+                    task_topic=task_topic,
+                    filename=filename,
+                    full_page=full_page,
+                )
+
                 feedback.status = "SUCCESS"
-                # 使用 JSON dumps 确保复杂结果能够被正确传递和解析
-                feedback.message = f"Extracted {len(results)} items: {results}"
+                feedback.message = f"Screenshot saved to: {screenshot_path}"
+
+            elif action.tool_name == "click_nth":
+                selector = self._get_selector(action.tool_args)
+                index = int(action.tool_args.get("index", 0))
+                timeout_ms = int(action.tool_args.get("timeout_ms", timeout_ms))
+
+                print(f"    -> Clicking element #{index} for selector: {selector}")
+                click_nth_match(
+                    page=self.page,
+                    selector=selector,
+                    index=index,
+                    timeout_ms=timeout_ms,
+                )
+
+            elif action.tool_name == "find_link_by_text":
+                keyword = action.tool_args.get("keyword")
+                limit = int(action.tool_args.get("limit", 5))
+
+                if not keyword:
+                    raise ValueError("find_link_by_text requires 'keyword' in tool_args.")
+
+                matches = find_link_by_text(
+                    page=self.page,
+                    keyword=keyword,
+                    limit=limit,
+                )
+
+                feedback.status = "SUCCESS"
+                feedback.message = f"Found {len(matches)} links: {matches}"
 
             elif action.tool_name == "click_element":
                 selector = self._get_selector(action.tool_args)
