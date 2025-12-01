@@ -1,5 +1,8 @@
 # 文件: backend/src/services/BrowserService.py
 
+import os
+import subprocess
+import tempfile
 import time
 from typing import List, Dict, Any, Optional
 # 导入 Playwright 同步 API 和 TimeoutError
@@ -169,6 +172,35 @@ class BrowserService:
             print(f"[BrowserService] Playwright Error during get_element_attribute: {e}")
             return ""
 
+    def _launch_notepad(self, action: DecisionAction, feedback: ActionFeedback):
+        """
+        启动 Windows 记事本，并可选地写入初始内容。
+        """
+        file_path = action.tool_args.get("file_path")
+        initial_content = action.tool_args.get("initial_content")
+
+        if file_path:
+            target_path = os.path.abspath(file_path)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        else:
+            fd, temp_path = tempfile.mkstemp(prefix="agent_note_", suffix=".txt")
+            os.close(fd)
+            target_path = temp_path
+
+        if initial_content:
+            with open(target_path, "w", encoding="utf-8") as f:
+                f.write(initial_content)
+
+        try:
+            subprocess.Popen(["notepad.exe", target_path], creationflags=subprocess.DETACHED_PROCESS)
+            feedback.status = "SUCCESS"
+            feedback.message = f"Notepad opened for file: {target_path}"
+        except Exception as exc:
+            feedback.status = "FAILED"
+            feedback.error_code = "NOTEPAD_LAUNCH_ERROR"
+            feedback.message = f"Failed to open Notepad: {exc}"
+            raise
+
     def execute_action(self, action: DecisionAction) -> WebObservation:
         """
         核心入口：执行动作 -> 等待页面稳定 -> 提取观测数据
@@ -282,6 +314,9 @@ class BrowserService:
                     self.page.click(selector, timeout=timeout_ms)
                 
                 # 如果代码执行到这里，说明导航成功完成
+
+            elif action.tool_name == "open_notepad":
+                self._launch_notepad(action, feedback)
 
             elif action.tool_name == "scroll":
                 direction = action.tool_args.get("direction", "down")

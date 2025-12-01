@@ -55,6 +55,7 @@ class LLMAdapter:
             "1. type_text 和 click_element 工具**必须**在 tool_args 中提供一个有效的 'selector' 或 'xpath' 字符串来定位元素。"
             "2. 如果使用 type_text 并指定了 submit_key='Enter'，则不必紧接着执行 click_element 来点击提交按钮。"
             "3. 对于复杂的、需要动态定位的点击（如搜索结果链接），请使用 on_failure_action: 'RE_EVALUATE'。"
+            "4. 当用户要求记录或整理信息时，可以调用 open_notepad 工具，tool_args 支持 file_path(可选) 和 initial_content(可选)。"
         )
 
         system_prompt = (
