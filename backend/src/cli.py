@@ -85,6 +85,9 @@ def _create_task_goal(description: str) -> TaskGoal:
             "extract_data",
             "get_element_attribute",
             "open_notepad",
+            "take_screenshot",
+            "click_nth",
+            "find_link_by_text",
         ],
     )
 

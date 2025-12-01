@@ -1,131 +1,162 @@
-## \# ai-web-agent-industrial：工业级自主 Web Agent 框架
+## ai-web-agent-industrial：工业级自主 Web Agent 框架
 
-[](https://www.python.org/downloads/)
-[](https://fastapi.tiangolo.com/)
-[](https://playwright.dev/)
-[](https://www.deepseek.com/)
+### 🚀 项目概述
 
-### 🚀 项目概述与核心目标
+本项目是一个 **工业级 Web 自动化 AI Agent 框架**，用于替代人工执行“打开网站、搜索、点击、提取数据、记录到记事本/文件”等重复性网页操作，并保证过程可审计、可回放、可扩展。  
+当前版本提供了一个基于 `rich` 的命令行对话前端，用户用自然语言描述任务，后端通过 **LLM + 动态执行图 (Dynamic Execution Graph)** 自动规划并驱动浏览器和本地工具执行。
 
-本项目的核心目标是开发一个高可靠、可审计的 AI Agent 框架，用于替代人类执行重复性的、基于网页（或其他界面）的机械性工作。
+**核心特性：**
 
-我们的 Agent 侧重于**工业级可靠性**，通过结构化数据模型和动态执行图来确保任务的可追溯性和稳定性，同时采用高级技术来**模拟人类操作**，有效应对网站的防爬和安全机制。
+- **工业级数据模型**：通过 Pydantic 定义 `TaskGoal` / `WebObservation` / `DecisionAction` / `ExecutionNode`，约束 LLM 输出，确保每一步操作可执行、可追踪。
+- **动态执行图 (DEG)**：使用 `DynamicExecutionGraph` 管理任务步骤及依赖，支持失败剪枝、动态纠错计划注入。
+- **浏览器自动化**：基于 Playwright 的 `BrowserService` 执行 `navigate_to` / `click_element` / `type_text` / `scroll` / `extract_data` 等操作。
+- **丰富工具层**：在 `backend/src/tools/` 中将“本地工具”和“浏览器工具”拆分为独立模块，便于按单个操作维护和扩展。
+- **可视化审计**：`VisualizationAdapter` 将 DEG 渲染为 Mermaid 图，并输出 HTML 报告到 `logs/graphs/`，便于复盘每次任务执行。
+- **统一临时文件管理**：所有由 Agent 生成的临时文件统一放在项目根目录 `temp/` 下，按类型（notes/screenshots/...）和任务主题+时间命名。
 
-**核心价值与特性：**
+更多面向开发者的细节，请参见 `docs/DEV_GUIDE.md`。
 
-  * **人类行为模拟 (Anti-Bot)**: 基于 Playwright，实现接近真实用户的操作模式（例如：鼠标随机移动、打字延迟），有效避免触发网站的反爬机制。
-  * **动态规划执行 (DEG)**: 引入 **动态执行图 (Dynamic Execution Graph)** 机制，确保任务的每一步都能被规划、跟踪、回溯，并支持异常熔断。
-  * **结构化决策**: 通过严格的 Pydantic 数据模型 (`TaskGoal`, `WebObservation`, `DecisionAction`) 约束 LLM 的输出，确保指令的准确性和可执行性。
-  * **实时监控与可审计性**: 基于 **FastAPI/WebSocket**，提供实时的任务状态更新和 **Mermaid** 可视化图表，实现对 Agent 运行流程的完全审计。
-  * **异步非阻塞后端**: Agent 核心阻塞逻辑在独立线程中执行 (`loop.run_in_executor`)，保障 API 的响应能力和 WebSocket 连接的稳定性。
-  * **多语言兼容数据模型**: 核心数据模型同时提供 Python (Pydantic) 和 C++ (Struct) 定义，便于未来与不同语言的工业系统集成。
+### 🧱 项目结构总览
 
-### ⚙️ 核心架构组件
-
-项目采用清晰的分层架构，解耦了决策、规划、执行和通信等核心逻辑：
-
-| 模块名称 | 文件路径 | 职责简述 |
-| :--- | :--- | :--- |
-| **决策执行者** (`DecisionMaker`) | `backend/src/agent/DecisionMaker.py` | 任务的生命周期管理者。驱动 Planner 流转，调用 BrowserService 执行操作，处理全局异常，并输出可视化快照。 |
-| **动态规划器** (`Planner`) | `backend/src/agent/Planner.py` | 管理 **动态执行图** 的流转逻辑。负责生成下一步执行节点，或加载静态测试计划。 |
-| **浏览器服务** (`BrowserService`) | `backend/src/services/BrowserService.py` | 基于 **Playwright** 的工具适配层。执行 `DecisionAction`（如点击、输入），并返回标准化的 `WebObservation`。 |
-| **LLM 适配器** (`LLMAdapter`) | `backend/src/services/LLMAdapter.py` | 封装 LLM API 调用，使用 JSON Schema 确保 LLM 严格遵守结构化决策模型的输出格式。 |
-| **可视化适配器** (`VisualizationAdapter`) | `backend/src/visualization/VisualizationAdapter.py` | 将 DEG 实时转换为 **Mermaid** 图表，用于生成流程审计的 HTML 报告。 |
-| **API 服务** (`main_server.py`) | `backend/api/main_server.py` | 基于 **FastAPI** 的 Web 服务，提供 WebSocket 接口用于任务启动和实时状态广播。 |
-
-### 🧩 核心数据模型（Pydantic/C++）
-
-项目的稳定运行依赖于以下四个严格定义的、工业级数据结构：
-
-| 模型名称 | 用途 | 关键字段 |
-| :--- | :--- | :--- |
-| **TaskGoal** | 任务目标与约束的定义。 | `target_description`, `task_deadline_utc`, `max_execution_time_seconds` |
-| **WebObservation** | 浏览器环境的结构化状态快照（LLM 的输入）。 | `current_url`, `key_elements`, `screenshot_available`, `last_action_feedback` |
-| **DecisionAction** | LLM 决策出的原子操作指令（Planner 的输出）。 | `tool_name`, `tool_args`, `reasoning`, `confidence_score` |
-| **ExecutionNode** | 动态执行图中的节点。 | `node_id`, `parent_id`, `action`, `current_status` (`PENDING`/`SUCCESS`/`FAILED`) |
+```text
+ai-web-agent-industrial/
+├─ run_agent.cmd                 # Windows 一键启动 / 清理脚本
+├─ backend/
+│  └─ src/
+│     ├─ agent/
+│     │  ├─ DecisionMaker.py     # 决策执行者：拉起浏览器、驱动执行图、处理失败与纠错
+│     │  └─ Planner.py           # 动态执行图 DEG：节点管理、优先级调度、纠错计划注入
+│     ├─ data_models/
+│     │  └─ decision_engine/
+│     │     ├─ decision_models.py # Pydantic 数据模型：TaskGoal / WebObservation / DecisionAction / ExecutionNode
+│     │     └─ ai_agent_models.hpp # C++ 版本的数据结构定义（便于跨语言集成）
+│     ├─ services/
+│     │  ├─ BrowserService.py    # Playwright 浏览器适配层 + 工具调用入口
+│     │  └─ LLMAdapter.py        # LLM 调用封装 + JSON Schema 约束
+│     ├─ tools/
+│     │  ├─ local_tools.py       # 本地工具（例如：launch_notepad）
+│     │  └─ browser/             # 浏览器工具（每个操作一个文件）
+│     │     ├─ search_results.py # extract_search_results：搜索结果提取
+│     │     ├─ screenshot.py     # take_screenshot：分类存储截图
+│     │     ├─ click_nth.py      # click_nth_match：点击第 N 个匹配元素
+│     │     └─ find_link_by_text.py # find_link_by_text：按文本模糊匹配链接
+│     ├─ utils/
+│     │  └─ path_utils.py        # get_project_root / build_temp_file_path 等路径与 temp 管理工具
+│     ├─ visualization/
+│     │  └─ VisualizationAdapter.py # DEG → Mermaid HTML 渲染
+│     └─ cli.py                  # rich 命令行对话入口（推荐使用）
+├─ logs/
+│  └─ graphs/                    # 执行图可视化 HTML 报告（运行时自动生成）
+├─ temp/                         # 统一临时文件目录（运行时自动创建）
+│  ├─ notes/                     # 记事本/文本类输出
+│  └─ screenshots/               # 截图文件
+└─ docs/
+   └─ DEV_GUIDE.md               # 开发手册（项目结构与文件职责说明）
+```
 
 ### 🛠️ 安装与配置
 
-#### 1\. 环境依赖
+#### 1. 环境依赖
 
-确保您的系统安装了 **Python 3.9+**，并安装了 `git`。
+- **操作系统**：Windows 10+（当前脚本和本地工具主要针对 Windows 做了适配）  
+- **Python**：3.9+  
+- **浏览器自动化**：Playwright (chromium)
 
 ```bash
 # 克隆仓库
 git clone <your-repo-link>
 cd ai-web-agent-industrial
 
-# 创建并激活虚拟环境
+# 创建并激活虚拟环境（示例）
 python -m venv venv
-source venv/bin/activate  # Linux/macOS
-.\venv\Scripts\activate   # Windows
+.\venv\Scripts\activate         # Windows
+# source venv/bin/activate      # Linux/macOS
 
 # 安装 Python 依赖
-pip install -r requirements.txt 
+pip install -r requirements.txt
 
 # 安装 Playwright 浏览器驱动
 playwright install chromium
 ```
 
-#### 2\. 配置环境变量
+#### 2. 配置环境变量
 
-创建 `.env` 文件，用于配置 LLM 密钥和 API 地址。
+在项目根目录创建 `.env` 文件，用于配置 LLM 和浏览器模式等信息：
 
 ```dotenv
-# .env 文件示例
-
-# LLM 配置 (DeepSeek 示例)
+# LLM 配置 (以 DeepSeek 为例)
 LLM_API_KEY="YOUR_LLM_API_KEY"
 LLM_MODEL_NAME="deepseek-chat"
 LLM_API_URL="https://api.deepseek.com/v1/chat/completions"
 
-# 默认浏览器运行模式 (True 为无头模式/后台运行，推荐生产环境使用)
-AGENT_HEADLESS=True 
+# 浏览器运行模式（True=无头，False=可见窗口）
+BROWSER_HEADLESS=False
 ```
 
-### ▶️ 快速开始
+### ▶️ 快速开始（推荐方式：命令行对话模式）
 
-#### 1\. 启动后端服务
+#### 1. 使用一键脚本启动
 
-使用 Uvicorn 启动异步 API 服务器：
+在项目根目录执行（或直接双击）`run_agent.cmd`：
+
+```cmd
+cd ai-web-agent-industrial
+run_agent.cmd
+```
+
+你会看到一个英文菜单：
+
+- **1**：Run CLI – 启动基于 `rich` 的对话式前端。  
+- **2**：Clean logs – 清理 `logs\` 目录。  
+- **3**：Clean temp – 清理 `temp\` 目录。  
+- **4**：Clean logs + temp – 同时清理日志和临时文件。  
+- **Q**：退出脚本。
+
+#### 2. 直接运行 CLI（等价于菜单 1）
 
 ```bash
-# --reload 仅用于开发环境
-uvicorn backend.api.main_server:app --reload --host 0.0.0.0 --port 8000
+python -m backend.src.cli
 ```
 
-服务器启动后，API 服务将在 `http://0.0.0.0:8000` 运行。
+在 CLI 中，你可以输入类似的自然语言指令，例如：
 
-#### 2\. 任务启动与实时监控 (WebSocket)
+- “打开百度搜索 合肥，提取前三条搜索结果标题，然后把结果写到记事本里”  
+- “打开某个官网，截图当前页面并保存到截图目录”  
+- “在当前页面查找包含 ‘官网’ 字样的链接，并将这些链接记录到记事本”  
 
-前端客户端（或测试脚本）通过 WebSocket 连接并发送启动指令：
+Agent 会自动：
 
-**WebSocket 地址:** `ws://0.0.0.0:8000/ws/agent/monitor`
+1. 将你的自然语言转换为 `TaskGoal`。  
+2. 通过 `LLMAdapter` 调用 LLM，根据 `allowed_actions` 规划出一系列 `ExecutionNode`。  
+3. 由 `DecisionMaker` 驱动 `BrowserService` 和 `tools/` 中的工具执行，实时打印结构化日志。  
+4. 在 `logs/graphs/` 中生成可视化 HTML 执行图。  
+5. 在 `temp/notes/`、`temp/screenshots/` 中生成对应的输出文件。
 
-**启动指令示例 (JSON Payload):**
+### 🧩 核心数据模型（Pydantic / C++）
 
-```json
-{
-    "command": "START_TASK",
-    "task_description": "Go to bing.com, search for 'Industrial AI Agent', and extract the first 3 links."
-}
-```
+核心数据模型位于 `backend/src/data_models/decision_engine/decision_models.py` 与 `ai_agent_models.hpp` 中，主要包括：
 
-**实时状态接收:** Agent 任务将在后台线程中执行，并通过 WebSocket 实时回调发送以下类型的状态消息：
+- **TaskGoal**：任务目标与约束（任务描述、优先级、允许使用的工具集合等）。  
+- **WebObservation**：浏览器当前状态快照（URL、HTTP 状态码、关键元素列表、上一步操作反馈等）。  
+- **DecisionAction**：单步操作指令（工具名 + 参数 + 决策解释 + 故障策略）。  
+- **ExecutionNode**：动态执行图节点（父子关系、优先级、运行状态、最新观测结果等）。  
 
-```json
-// 运行中状态示例
-{"type": "STATUS", "level": "RUNNING", "message": "Agent execution started in background thread."}
-
-// 操作进度示例
-{"type": "ACTION", "level": "INFO", "message": "Executing action: click_element, XPath: //button[@id='search-button']"}
-
-// 任务完成示例
-{"type": "STATUS", "level": "SUCCESS", "message": "Agent task execution finished."}
-```
+这些结构通过 JSON Schema 暴露给 LLM，使得 LLM 的规划结果可以被严格验证和回放。
 
 ### 📈 可视化审计
 
-在 Agent 运行过程中，`VisualizationAdapter` 会将当前的动态执行图 (DEG) 转换为 **Mermaid** 图。
+`VisualizationAdapter` 会在以下时机输出执行图快照：
 
-您可以通过打开生成的 HTML 报告文件，直观地查看任务流程、节点状态（`SUCCESS` 绿色, `FAILED` 红色等）和操作之间的逻辑依赖关系，极大提高了 Agent 行为的可审计性。
+- 初始规划完成后（`*_00_initial_plan.html`）。  
+- 每个步骤执行之后（`*_step_XX_NODE_ID.html`）。  
+
+你可以打开 `logs/graphs/` 下的 HTML 文件，查看每次任务执行的完整决策路径、每个节点的状态变化和依赖关系，用于调试和合规审计。
+
+### 📚 开发手册
+
+开发者可阅读 `docs/DEV_GUIDE.md` 了解：
+
+- 完整的模块分层说明（Agent / Services / Tools / Utils）。  
+- 如何为 Agent 添加新的工具（例如更多浏览器操作、本地应用集成）。  
+- 如何扩展 LLM 提示词和 JSON Schema，让大模型安全地使用新工具。  
+- 常见调试技巧与日志/临时文件管理规范。  
