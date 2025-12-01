@@ -1,9 +1,10 @@
 # 文件: backend/src/agent/DecisionMaker.py
 
-import time
-import uuid
 import os
 import sys
+import tempfile
+import time
+import uuid
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -80,36 +81,96 @@ class DecisionMaker:
         self.execution_counter += 1
         # 结构化日志
         print(f"\n>>> [STEP {self.execution_counter}] Executing Tool: [{action.tool_name}]")
-        
-        if not self.browser_service:
-            raise RuntimeError("BrowserService is not initialized.")
-
         try:
-            # 调用底层服务
-            observation = self.browser_service.execute_action(action)
-            
+            # 1. 纯本地工具：不需要浏览器（如 open_notepad）
+            if action.tool_name == "open_notepad":
+                file_path = action.tool_args.get("file_path")
+                initial_content = action.tool_args.get("initial_content", "")
+
+                if file_path:
+                    target_path = os.path.abspath(file_path)
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                else:
+                    fd, temp_path = tempfile.mkstemp(prefix="agent_note_", suffix=".txt")
+                    os.close(fd)
+                    target_path = temp_path
+
+                if initial_content:
+                    with open(target_path, "w", encoding="utf-8") as f:
+                        f.write(initial_content)
+
+                try:
+                    # 在 Windows 上启动记事本，且不阻塞当前进程
+                    if sys.platform.startswith("win"):
+                        DETACHED = getattr(os, "DETACHED_PROCESS", 0x00000008)
+                        import subprocess
+
+                        subprocess.Popen(
+                            ["notepad.exe", target_path],
+                            creationflags=DETACHED,
+                        )
+                    else:
+                        print(f"[LOCAL TOOL] open_notepad is only fully supported on Windows. File path: {target_path}")
+
+                    fb = ActionFeedback(
+                        status="SUCCESS",
+                        error_code="0",
+                        message=f"Notepad opened for file: {target_path}",
+                    )
+                except Exception as exc:
+                    fb = ActionFeedback(
+                        status="FAILED",
+                        error_code="NOTEPAD_LAUNCH_ERROR",
+                        message=f"Failed to open Notepad: {exc}",
+                    )
+
+                observation = WebObservation(
+                    observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    current_url="local://notepad",
+                    http_status_code=200 if fb.status == "SUCCESS" else 500,
+                    page_load_time_ms=0,
+                    is_authenticated=False,
+                    key_elements=[],
+                    screenshot_available=False,
+                    last_action_feedback=fb,
+                    memory_context="Local tool execution (open_notepad).",
+                )
+
+            else:
+                # 2. 需要浏览器的工具：按需延迟初始化 BrowserService
+                if not self.browser_service:
+                    self._init_browser()
+
+                observation = self.browser_service.execute_action(action)
+
             # 简单的结果摘要
             fb = observation.last_action_feedback
             status_icon = "✅" if fb and fb.status == "SUCCESS" else "❌"
-            print(f"    {status_icon} Result: {fb.status if fb else 'NO FEEDBACK'} | HTTP: {observation.http_status_code} | URL: {observation.current_url}")
-            
+            print(
+                f"    {status_icon} Result: {fb.status if fb else 'NO FEEDBACK'} | "
+                f"HTTP: {observation.http_status_code} | URL: {observation.current_url}"
+            )
+
             if fb and fb.status == "FAILED":
                 print(f"    ⚠️ Error Details: {fb.message}")
-                
+
             return observation
-            
+
         except Exception as e:
             print(f"!!! [CRITICAL] Unhandled Exception in Action Execution: {e}")
             # 返回兜底的失败观测，防止程序崩溃，允许 Planner 尝试恢复
             return WebObservation(
+                observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
                 current_url="unknown",
                 http_status_code=500,
                 page_load_time_ms=0,
+                is_authenticated=False,
                 key_elements=[],
+                screenshot_available=False,
                 memory_context="System Critical Failure",
                 last_action_feedback=ActionFeedback(
                     status="FAILED", error_code="SYSTEM_EXCEPTION", message=str(e)
-                )
+                ),
             )
 
     def _handle_execution_result(self, node: ExecutionNode, observation: WebObservation) -> bool:
@@ -282,8 +343,6 @@ class DecisionMaker:
     def run(self):
         """主执行循环"""
         self.is_running = True
-        self._init_browser()
-        
         try:
             # 1. 规划阶段 (Planning Phase)
             # 只有当计划为空时，才请求 LLM。支持 "Human-in-the-loop" 或 "Pre-loaded Plan" 模式。

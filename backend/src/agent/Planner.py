@@ -16,6 +16,7 @@ class DynamicExecutionGraph:
     def __init__(self):
         self.nodes: Dict[str, ExecutionNode] = {}
         self.root_node_id: Optional[str] = None
+        self.nodes_execution_order: List[str] = []
 
     def add_node(self, node: ExecutionNode):
         """添加节点到图中，并维护父子关系和子节点优先级排序。"""
@@ -23,6 +24,8 @@ class DynamicExecutionGraph:
             print(f"Warning: Node ID {node.node_id} already exists. Overwriting.")
         
         self.nodes[node.node_id] = node
+        if node.node_id not in self.nodes_execution_order:
+            self.nodes_execution_order.append(node.node_id)
         
         if node.parent_id is None:
             if self.root_node_id is not None and self.root_node_id != node.node_id:
@@ -145,6 +148,22 @@ class DynamicExecutionGraph:
         # 4. 标记旧节点失败
         failed_node.current_status = ExecutionNodeStatus.FAILED
         print(f"[INJECT] Successfully injected {len(correction_plan_fragment)} nodes after {failed_node_id}. Graph updated.")
+
+    def generate_initial_plan_with_llm(self, task_goal: TaskGoal, observation: Optional[WebObservation] = None):
+        """
+        调用 LLMAdapter 生成初始计划，并写入执行图。
+        """
+        node_candidates = LLMAdapter.generate_nodes(task_goal, observation)
+        if not node_candidates:
+            raise RuntimeError("LLM returned no execution nodes; cannot start plan.")
+
+        # 重置现有图，确保是一次新的执行
+        self.nodes.clear()
+        self.nodes_execution_order.clear()
+        self.root_node_id = None
+
+        for node in node_candidates:
+            self.add_node(node)
 
     def load_plan_from_json(self, file_path: str) -> 'DynamicExecutionGraph':
         # ... (保持不变) ...
