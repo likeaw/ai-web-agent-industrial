@@ -486,6 +486,8 @@ if __name__ == '__main__':
             "take_screenshot",
             "click_nth",
             "find_link_by_text",
+            "download_page",
+            "download_link",
         ],
     )
     

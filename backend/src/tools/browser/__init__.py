@@ -8,5 +8,6 @@ from .search_results import extract_search_results  # noqa: F401
 from .screenshot import take_screenshot  # noqa: F401
 from .click_nth import click_nth_match  # noqa: F401
 from .find_link_by_text import find_link_by_text  # noqa: F401
+from .downloads import save_current_page_html, download_from_link  # noqa: F401
 
 

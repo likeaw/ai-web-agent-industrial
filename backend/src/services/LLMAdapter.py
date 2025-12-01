@@ -59,6 +59,8 @@ class LLMAdapter:
             "4. 当需要保存当前页面截图时，请使用 take_screenshot，tool_args 至少包含 task_topic(字符串)，可选 filename 和 full_page(bool)。"
             "5. 当需要点击搜索结果或重复元素列表中的第 N 个元素时，请使用 click_nth，tool_args 中包含 selector/xpath/text_content 以及 index(从0开始)。"
             "6. 当需要按文本模糊匹配链接时，请使用 find_link_by_text，tool_args 中包含 keyword(字符串) 和可选 limit(整数，默认5)。"
+            "7. 当需要保存当前页面 HTML 源码时，请使用 download_page，tool_args 中包含 task_topic(字符串，用于生成文件名)。"
+            "8. 当需要下载链接中的内容时，请使用 download_link，tool_args 可以包含 url(直接下载) 或 selector/xpath/text_content(从页面元素读取 href)，以及 task_topic(字符串)。"
         )
 
         system_prompt = (

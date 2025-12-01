@@ -1,0 +1,75 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Agent Execution Graph: plan_TASK-ff6651fa_step_12_node_2</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        h1 { border-bottom: 2px solid #ccc; padding-bottom: 10px; }
+        .mermaid { width: 100%; height: auto; border: 1px solid #ddd; padding: 10px; box-sizing: border-box; }
+        
+        /* 自定义 Mermaid 样式 */
+        .node.success rect { fill: #90EE90; stroke: #3C3; stroke-width: 2px; }
+        .node.running rect { fill: yellow; stroke: #FF0; stroke-width: 2px; }
+        .node.failed rect { fill: #FA8072; stroke: #F00; stroke-width: 2px; }
+        .node.pending rect { fill: lightblue; stroke: #39F; stroke-width: 2px; }
+        .node.pruned rect { fill: grey; stroke: #666; stroke-width: 2px; }
+        
+        .edgeLabel { background-color: white; padding: 0 5px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Agent Execution Graph Snapshot: plan_TASK-ff6651fa_step_12_node_2</h1>
+    <p>Timestamp: 2025-12-01 16:36:42</p>
+    <pre class="mermaid">
+graph TD
+    1["ID: 1<br/>P: 1<br/>Tool: navigate_to<br/>Status: SUCCESS"]
+    2["ID: 2<br/>P: 1<br/>Tool: find_link_by_text<br/>Status: SUCCESS"]
+    3["ID: 3<br/>P: 1<br/>Tool: click_element<br/>Status: SUCCESS"]
+    4["ID: 4<br/>P: 1<br/>Tool: type_text<br/>Status: FAILED"]
+    5["ID: 5<br/>P: 1<br/>Tool: type_text<br/>Status: PRUNED"]
+    6["ID: 6<br/>P: 1<br/>Tool: find_link_by_text<br/>Status: PRUNED"]
+    7["ID: 7<br/>P: 1<br/>Tool: click_element<br/>Status: PRUNED"]
+    8["ID: 8<br/>P: 1<br/>Tool: take_screenshot<br/>Status: PRUNED"]
+    node_1["ID: node_1<br/>P: 1<br/>Tool: click_element<br/>Status: PENDING"]
+    node_2["ID: node_2<br/>P: 1<br/>Tool: type_text<br/>Status: PENDING"]
+    node_3["ID: node_3<br/>P: 1<br/>Tool: take_screenshot<br/>Status: PENDING"]
+    step_1["ID: step_1<br/>P: 1<br/>Tool: click_element<br/>Status: SUCCESS"]
+    step_2["ID: step_2<br/>P: 1<br/>Tool: type_text<br/>Status: FAILED"]
+    step_3["ID: step_3<br/>P: 1<br/>Tool: take_screenshot<br/>Status: PRUNED"]
+    1 -->|P1| 2
+    2 -->|P1| 3
+    3 -->|P1| 4
+    node_3 -->|P1| 5
+    5 -->|P1| 6
+    6 -->|P1| 7
+    7 -->|P1| 8
+    node_2 -->|P1| node_1
+    node_1 -->|P1| node_2
+    node_3 -->|P1| node_3
+    node_3 -->|P1| step_1
+    step_1 -->|P1| step_2
+    node_3 -->|P1| step_3
+
+    class 1 success;
+    class 2 success;
+    class 3 success;
+    class 4 failed;
+    class 5 pruned;
+    class 6 pruned;
+    class 7 pruned;
+    class 8 pruned;
+    class node_1 pending;
+    class node_2 pending;
+    class node_3 pending;
+    class step_1 success;
+    class step_2 failed;
+    class step_3 pruned;
+    </pre>
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>
