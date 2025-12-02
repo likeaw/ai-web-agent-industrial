@@ -1,3 +1,0 @@
-﻿/
-javascript:;
-https://passport.baidu.com/v2/?login&tpl=mn&u=http%3A%2F%2Fwww.baidu.com%2F&sms=5
