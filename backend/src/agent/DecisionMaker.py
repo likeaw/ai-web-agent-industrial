@@ -8,6 +8,10 @@ import uuid
 from typing import Optional
 from dotenv import load_dotenv
 
+# Rich 进度条和输出
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+
 # --- 核心模块引入 ---
 from backend.src.agent.Planner import DynamicExecutionGraph
 from backend.src.services.LLMAdapter import LLMAdapter
@@ -27,6 +31,9 @@ from backend.src.data_models.decision_engine.decision_models import (
 
 # 加载环境变量 (确保在任何逻辑执行前加载)
 load_dotenv()
+
+# Rich Console 实例
+console = Console()
 
 class DecisionMaker:
     """
@@ -62,20 +69,20 @@ class DecisionMaker:
         """延迟初始化浏览器资源，仅在 run 开始时调用。"""
         if not self.browser_service:
             try:
-                print(f"--- [System] Initializing BrowserService (Headless: {self.headless}) ---")
+                console.print(f"[dim]Initializing BrowserService (Headless: {self.headless})...[/dim]")
                 self.browser_service = BrowserService(headless=self.headless)
             except Exception as e:
-                print(f"!!! [CRITICAL] Failed to initialize BrowserService: {e}")
+                console.print(f"[red][CRITICAL] Failed to initialize BrowserService: {e}[/red]")
                 raise RuntimeError("Browser initialization failed.") from e
 
     def close(self):
         """资源清理钩子，确保浏览器进程不残留。"""
         if self.browser_service:
-            print("--- [System] Closing BrowserService ---")
+            console.print("[dim]Closing BrowserService...[/dim]")
             try:
                 self.browser_service.close()
             except Exception as e:
-                print(f"[WARN] Error during browser closure: {e}")
+                console.print(f"[yellow][WARN] Error during browser closure: {e}[/yellow]")
             finally:
                 self.browser_service = None
 
@@ -84,8 +91,6 @@ class DecisionMaker:
         执行原子操作。
         """
         self.execution_counter += 1
-        # 结构化日志
-        print(f"\n>>> [STEP {self.execution_counter}] Executing Tool: [{action.tool_name}]")
         try:
             # 1. 纯本地工具：不需要浏览器（如 open_notepad）
             if action.tool_name == "open_notepad":
@@ -115,7 +120,6 @@ class DecisionMaker:
                                     titles_text = raw_output
                             else:
                                 titles_text = raw_output
-                            print(f"[LOCAL TOOL] Found resolved_output from node {nid} for notepad content.")
                             break
 
                 # 逻辑简化：一旦有提取结果，就完全覆盖 initial_content，避免占位符残留
@@ -157,21 +161,15 @@ class DecisionMaker:
 
                 observation = self.browser_service.execute_action(action)
 
-            # 简单的结果摘要
+            # 结果摘要（仅在失败时输出详细信息）
             fb = observation.last_action_feedback
-            status_icon = "✅" if fb and fb.status == "SUCCESS" else "❌"
-            print(
-                f"    {status_icon} Result: {fb.status if fb else 'NO FEEDBACK'} | "
-                f"HTTP: {observation.http_status_code} | URL: {observation.current_url}"
-            )
-
             if fb and fb.status == "FAILED":
-                print(f"    ⚠️ Error Details: {fb.message}")
+                console.print(f"[red]    ✗ {action.tool_name} failed: {fb.message}[/red]")
 
             return observation
 
         except Exception as e:
-            print(f"!!! [CRITICAL] Unhandled Exception in Action Execution: {e}")
+            console.print(f"[red][CRITICAL] Unhandled Exception in Action Execution: {e}[/red]")
             # 返回兜底的失败观测，防止程序崩溃，允许 Planner 尝试恢复
             return WebObservation(
                 observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -202,25 +200,23 @@ class DecisionMaker:
         # 1. 成功情况
         if feedback.status == 'SUCCESS':
             node.current_status = ExecutionNodeStatus.SUCCESS
-            print(f"    [PLAN] Node {node.node_id} COMPLETED. Graph updated.")
             return True
         
         # 2. 失败情况处理
-        print(f"!!! [FAILURE] Node {node.node_id} failed. Reason: {feedback.message}")
+        console.print(f"[yellow]Node {node.node_id} failed: {feedback.message}[/yellow]")
         self.planner.prune_on_failure(node.node_id, feedback.message)
         
         # 检查节点的失败策略
         if node.action.on_failure_action == "STOP_TASK":
-            print(f"!!! Strategy is STOP_TASK. Halting execution.")
+            console.print("[red]Strategy is STOP_TASK. Halting execution.[/red]")
             node.current_status = ExecutionNodeStatus.FAILED
             return False
             
         elif node.action.on_failure_action == "RE_EVALUATE":
-            print(f"--- [RE-PLANNING] Initiating Dynamic Correction for Node {node.node_id} ---")
+            console.print(f"[cyan]Re-planning: Generating correction plan for Node {node.node_id}...[/cyan]")
             
             # A. 构造纠错上下文
-            # 我们创建一个临时的 Goal，明确告诉 LLM 发生了什么错误
-            correction_goal = self.task_goal.model_copy() # 需要 Pydantic 的 copy 方法
+            correction_goal = self.task_goal.model_copy()
             correction_goal.target_description = (
                 f"ORIGINAL GOAL: {self.task_goal.target_description}\n"
                 f"CONTEXT: The step '{node.action.tool_name}' FAILED.\n"
@@ -229,22 +225,19 @@ class DecisionMaker:
             )
             
             # B. 调用 LLM 生成纠错片段
-            # 注意：传入当前的 observation，这样 LLM 可以看到报错后的页面状态
             try:
-                print(f"    [LLM] Requesting correction plan...")
                 correction_nodes = LLMAdapter.generate_nodes(correction_goal, observation)
                 
                 if correction_nodes:
-                    # C. 注入新计划
-                    print(f"    [PLAN] Injecting {len(correction_nodes)} correction nodes...")
                     self.planner.inject_correction_plan(node.node_id, correction_nodes)
-                    return True # 继续执行循环，下次会取到新注入的节点
+                    console.print(f"[green]Injected {len(correction_nodes)} correction nodes.[/green]")
+                    return True
                 else:
-                    print("    [LLM] Returned empty correction plan. Cannot recover.")
+                    console.print("[red]LLM returned empty correction plan. Cannot recover.[/red]")
                     return False
                     
             except Exception as e:
-                print(f"    [ERROR] Re-planning failed: {e}")
+                console.print(f"[red]Re-planning failed: {e}[/red]")
                 return False
                 
         # 默认处理
@@ -264,7 +257,7 @@ class DecisionMaker:
             with open(os.path.join(output_dir, f"{filename}.html"), 'w', encoding='utf-8') as f:
                 f.write(content)
         except Exception as e:
-            print(f"[WARN] Visualization failed: {e}")
+            console.print(f"[yellow][WARN] Visualization failed: {e}[/yellow]")
 
     def _resolve_dynamic_args(self, node: ExecutionNode) -> DecisionAction:
         """
@@ -289,7 +282,6 @@ class DecisionMaker:
                     raise ValueError(f"Dynamic argument source node '{source_node_id}' succeeded but has no captured output ('resolved_output').")
 
                 resolved_args[key] = resolved_value
-                print(f"--- [RESOLVE] Replaced '{value}' with captured output for '{key}'.")
         
         # 返回一个新的 DecisionAction 实例
         return DecisionAction(
@@ -355,101 +347,126 @@ class DecisionMaker:
         print("==================================================")
 
     def run(self):
-        """主执行循环"""
+        """主执行循环（带 Rich 进度条）"""
         self.is_running = True
-        try:
-            # 1. 规划阶段 (Planning Phase)
-            # 只有当计划为空时，才请求 LLM。支持 "Human-in-the-loop" 或 "Pre-loaded Plan" 模式。
-            if not self.planner.nodes:
-                print("\n--- Phase 1: Dynamic Planning (LLM) ---")
-                self.planner.generate_initial_plan_with_llm(self.task_goal)
-            else:
-                print("\n--- Phase 1: Static Plan Loaded (Skipping LLM) ---")
-            
-            # 保存初始计划快照
-            self._save_visualization("00_initial_plan")
-            
-            if not self.planner.nodes:
-                print("[ERROR] Execution halted: Plan is empty after initialization.")
-                return
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            try:
+                # 1. 规划阶段 (Planning Phase)
+                planning_task = progress.add_task("[cyan]Phase 1: Planning...", total=None)
+                
+                if not self.planner.nodes:
+                    progress.update(planning_task, description="[cyan]Phase 1: Generating plan with LLM...")
+                    self.planner.generate_initial_plan_with_llm(self.task_goal)
+                else:
+                    progress.update(planning_task, description="[cyan]Phase 1: Using pre-loaded plan...")
+                
+                # 保存初始计划快照
+                self._save_visualization("00_initial_plan")
+                progress.update(planning_task, completed=True)
+                
+                if not self.planner.nodes:
+                    console.print("[red][ERROR] Execution halted: Plan is empty after initialization.[/red]")
+                    return
 
-            # 2. 执行阶段 (Execution Phase)
-            print("\n--- Phase 2: Execution Loop ---")
-            while self.is_running:
+                # 统计总节点数（用于进度条）
+                total_pending = sum(1 for n in self.planner.nodes.values() if n.current_status == ExecutionNodeStatus.PENDING)
+                if total_pending == 0:
+                    total_pending = len(self.planner.nodes)
                 
-                # 获取下一个可执行节点 (Priority-based DFS)
-                self.current_node = self.planner.get_next_node_to_execute()
+                # 2. 执行阶段 (Execution Phase)
+                execution_task = progress.add_task(
+                    "[green]Phase 2: Executing actions...", 
+                    total=total_pending
+                )
                 
-                if self.current_node is None:
-                    print("\n[FINISH] No more PENDING nodes. Task completed or path exhausted.")
-                    break
+                while self.is_running:
+                    # 获取下一个可执行节点 (Priority-based DFS)
+                    self.current_node = self.planner.get_next_node_to_execute()
                     
-                # 状态流转: PENDING -> RUNNING
-                self.current_node.current_status = ExecutionNodeStatus.RUNNING
-
-                # 动态参数替换 (Dynamic Argument Resolution)
-                try:
-                    resolved_action = self._resolve_dynamic_args(self.current_node)
-                    # 使用解析后的 action
-                    self.current_node.action = resolved_action 
-                except ValueError as e:
-                    # 参数替换失败，节点直接标记为失败
-                    print(f"!!! [ERROR] Dynamic Argument Resolution FAILED ({self.current_node.node_id}): {e}")
-                    self.current_node.current_status = ExecutionNodeStatus.FAILED
-                    # 构造一个失败的 Observation 来触发正常的失败处理流程
-                    observation = WebObservation(
-                        current_url=self.browser_service.page.url if self.browser_service and self.browser_service.page else "unknown",
-                        http_status_code=500,
-                        page_load_time_ms=0,
-                        key_elements=[],
-                        memory_context="Dynamic Argument Resolution Failed",
-                        last_action_feedback=ActionFeedback(
-                            status="FAILED", error_code="ARG_RESOLVE_ERROR", message=str(e)
-                        )
+                    if self.current_node is None:
+                        progress.update(execution_task, completed=total_pending, description="[green]Phase 2: Execution completed")
+                        break
+                    
+                    # 更新进度条描述：显示当前执行的工具
+                    progress.update(
+                        execution_task, 
+                        description=f"[green]Phase 2: Executing [{self.current_node.action.tool_name}] ({self.current_node.node_id})..."
                     )
-                    # [修改点 3] 赋值 last_observation
-                    self.current_node.last_observation = observation
+                    
+                    # 状态流转: PENDING -> RUNNING
+                    self.current_node.current_status = ExecutionNodeStatus.RUNNING
+
+                    # 动态参数替换 (Dynamic Argument Resolution)
+                    try:
+                        resolved_action = self._resolve_dynamic_args(self.current_node)
+                        self.current_node.action = resolved_action 
+                    except ValueError as e:
+                        console.print(f"[red][ERROR] Dynamic Argument Resolution FAILED ({self.current_node.node_id}): {e}[/red]")
+                        self.current_node.current_status = ExecutionNodeStatus.FAILED
+                        observation = WebObservation(
+                            current_url=self.browser_service.page.url if self.browser_service and self.browser_service.page else "unknown",
+                            http_status_code=500,
+                            page_load_time_ms=0,
+                            key_elements=[],
+                            memory_context="Dynamic Argument Resolution Failed",
+                            last_action_feedback=ActionFeedback(
+                                status="FAILED", error_code="ARG_RESOLVE_ERROR", message=str(e)
+                            )
+                        )
+                        self.current_node.last_observation = observation
+                        should_continue = self._handle_execution_result(self.current_node, observation)
+                        self._save_visualization(f"step_{self.execution_counter:02d}_{self.current_node.node_id}_FAIL")
+                        progress.advance(execution_task)
+                        if not should_continue:
+                            self.is_running = False
+                            break
+                        continue
+                    
+                    # 执行
+                    observation = self._execute_action(self.current_node.action)
+                    
+                    # 状态流转: RUNNING -> SUCCESS/FAILED & Pruning
                     should_continue = self._handle_execution_result(self.current_node, observation)
-                    self._save_visualization(f"step_{self.execution_counter:02d}_{self.current_node.node_id}_FAIL")
+                    
+                    # 结果捕获逻辑
+                    if self.current_node.current_status == ExecutionNodeStatus.SUCCESS and observation.last_action_feedback and observation.last_action_feedback.message:
+                        self.current_node.resolved_output = observation.last_action_feedback.message
+                    
+                    # 快照审计
+                    self._save_visualization(f"step_{self.execution_counter:02d}_{self.current_node.node_id}")
+                    
+                    # 更新进度条
+                    progress.advance(execution_task)
+                    
                     if not should_continue:
                         self.is_running = False
                         break
-                    continue # 跳过本轮剩余部分，继续下一循环获取下一个节点
                     
-                # 执行
-                observation = self._execute_action(self.current_node.action)
+                    # 硬性安全熔断 (防止无限循环)
+                    if self.execution_counter >= 50:
+                        console.print("[yellow][ABORT] Reached max safety iteration limit (50).[/yellow]")
+                        break
+                        
+            except KeyboardInterrupt:
+                console.print("\n[yellow][USER ABORT] Execution interrupted by user.[/yellow]")
+            except Exception as e:
+                console.print(f"\n[red][FATAL ERROR] Unhandled exception in run loop: {e}[/red]")
+                import traceback
+                traceback.print_exc()
+            finally:
+                # 任务结束时调用总结报告
+                self._generate_execution_summary() 
                 
-                # 状态流转: RUNNING -> SUCCESS/FAILED & Pruning
-                should_continue = self._handle_execution_result(self.current_node, observation)
-                
-                # [修改点 4] 结果捕获逻辑：使用直接赋值，因为 resolved_output 现在是模型的一部分。
-                if self.current_node.current_status == ExecutionNodeStatus.SUCCESS and observation.last_action_feedback and observation.last_action_feedback.message:
-                    self.current_node.resolved_output = observation.last_action_feedback.message
-                
-                # 快照审计
-                self._save_visualization(f"step_{self.execution_counter:02d}_{self.current_node.node_id}")
-                
-                if not should_continue:
-                    self.is_running = False
-                    break
-                
-                # 硬性安全熔断 (防止无限循环)
-                if self.execution_counter >= 50:
-                    print("[ABORT] Reached max safety iteration limit (50).")
-                    break
-                    
-        except KeyboardInterrupt:
-            print("\n[USER ABORT] Execution interrupted by user.")
-        except Exception as e:
-            print(f"\n[FATAL ERROR] Unhandled exception in run loop: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            # 任务结束时调用总结报告
-            self._generate_execution_summary() 
-            
-            self.close()
-            print("--- DecisionMaker Terminated ---")
+                self.close()
+                console.print("[dim]--- DecisionMaker Terminated ---[/dim]")
 
 
 # ----------------------------------------------------------------------

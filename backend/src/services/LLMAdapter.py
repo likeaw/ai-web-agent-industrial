@@ -104,15 +104,8 @@ class LLMAdapter:
             print("ERROR: LLM API Key missing. Cannot generate dynamic plan.")
             return []
             
-        print(f"--- Calling LLM ({LLMAdapter.MODEL_NAME}) at URL: {LLMAdapter.API_URL} ---")
-        
         json_schema = LLMAdapter._create_json_schema()
         payload = LLMAdapter._create_api_payload(goal, observation, json_schema)
-        
-        print("--- DEBUG: Full Request Payload (for debugging JSON Schema) ---")
-        payload_str = json.dumps(payload, indent=2, ensure_ascii=False)
-        print(payload_str[:500] + "..." if len(payload_str) > 500 else payload_str)
-        print("-----------------------------------------------------------------")
         
         headers = {
             "Authorization": f"Bearer {LLMAdapter.API_KEY}",
@@ -166,10 +159,4 @@ class LLMAdapter:
         except (KeyError, json.JSONDecodeError, ValueError) as e:
             # ... (错误处理保持不变)
             print(f"API Response Parsing FAILED (LLM output format error/Pydantic validation): {e}")
-            
-            try:
-                print(f"DEBUG: Raw LLM response content: {response.text}")
-            except:
-                pass
-            print(f"DEBUG: Payload JSON Schema was enforced: {json.dumps(json_schema, indent=2)}")
             return []

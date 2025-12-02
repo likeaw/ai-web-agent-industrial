@@ -262,17 +262,6 @@ class BrowserService:
                 # 导航后检查是否命中登录页面
                 self._maybe_wait_for_manual_login()
             
-            elif action.tool_name == "click_element":
-                selector = self._get_selector(action.tool_args)
-                
-                # 只等待元素存在 (attached)
-                self.page.wait_for_selector(selector, state="attached", timeout=timeout_ms) 
-                
-                # 强制点击 (force=True)，忽略可见性或被覆盖的检查。
-                self.page.click(selector, timeout=timeout_ms, force=True)
-                # 点击后可能跳转到登录页，做一次检测
-                self._maybe_wait_for_manual_login()
-            
             elif action.tool_name == "type_text":
                 selector = self._get_selector(action.tool_args)
                 text = action.tool_args.get("text", "")
@@ -421,10 +410,16 @@ class BrowserService:
                 
                 # 2. 预期导航发生并执行点击
                 # 这一步会等待 URL 变化或页面加载完成。
-                with self.page.expect_navigation(timeout=timeout_ms):
+                # 如果点击不导致导航，expect_navigation 会超时，所以用 try-except 处理
+                try:
+                    with self.page.expect_navigation(timeout=timeout_ms):
+                        self.page.click(selector, timeout=timeout_ms)
+                except TimeoutError:
+                    # 点击可能不导致导航（如按钮触发 AJAX），直接点击即可
                     self.page.click(selector, timeout=timeout_ms)
                 
-                # 如果代码执行到这里，说明导航成功完成
+                # 点击后可能跳转到登录页，做一次检测
+                self._maybe_wait_for_manual_login()
 
             elif action.tool_name == "open_notepad":
                 self._launch_notepad(action, feedback)
