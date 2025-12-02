@@ -15,7 +15,14 @@ from backend.src.data_models.decision_engine.decision_models import (
 )
 
 # 浏览器工具层（单个操作的可扩展实现）
-from backend.src.tools.browser import extract_search_results, take_screenshot, click_nth_match, find_link_by_text
+from backend.src.tools.browser import (
+    extract_search_results,
+    take_screenshot,
+    click_nth_match,
+    find_link_by_text,
+    save_current_page_html,
+    download_from_link,
+)
 class BrowserService:
     """
     工业级浏览器适配器 (基于 Playwright)。
@@ -32,6 +39,8 @@ class BrowserService:
         )
         self.page: Page = self.context.new_page()
         self._last_http_status = 200
+        self._headless = headless
+        self._login_prompt_shown = False
 
         self.page.on("response", self._handle_response)
 
@@ -44,6 +53,36 @@ class BrowserService:
         self.context.close()
         self.browser.close()
         self.playwright.stop()
+
+    def _maybe_wait_for_manual_login(self):
+        """
+        检测是否处于登录页面，如果是且为有头模式，则提示用户在浏览器中完成登录后按回车继续。
+        这样可以在前置登录场景下，避免自动化脚本触发反爬/风控。
+        """
+        if self._headless or self._login_prompt_shown:
+            return
+
+        try:
+            url = (self.page.url or "").lower()
+        except Exception:
+            url = ""
+
+        # 简单启发式：URL 中包含 login / signin / auth，或页面有密码输入框
+        has_password = False
+        try:
+            has_password = self.page.locator("input[type='password']").count() > 0
+        except Exception:
+            has_password = False
+
+        if ("login" in url or "signin" in url or "auth" in url) or has_password:
+            self._login_prompt_shown = True
+            print("\n[HUMAN-ASSIST] Possible login page detected.")
+            print("Please complete login in the browser window, then press ENTER here to continue...")
+            try:
+                input()
+            except EOFError:
+                # 在无法交互的环境下，直接继续，不阻塞
+                print("[HUMAN-ASSIST] Input not available; continuing without manual login wait.")
 
     def _get_selector(self, args: Dict) -> str:
         """
@@ -220,15 +259,8 @@ class BrowserService:
                 if not url:
                     raise ValueError("Missing 'url' in tool_args")
                 self.page.goto(url, wait_until="load", timeout=timeout_ms)
-            
-            elif action.tool_name == "click_element":
-                selector = self._get_selector(action.tool_args)
-                
-                # 只等待元素存在 (attached)
-                self.page.wait_for_selector(selector, state="attached", timeout=timeout_ms) 
-                
-                # 强制点击 (force=True)，忽略可见性或被覆盖的检查。
-                self.page.click(selector, timeout=timeout_ms, force=True)
+                # 导航后检查是否命中登录页面
+                self._maybe_wait_for_manual_login()
             
             elif action.tool_name == "type_text":
                 selector = self._get_selector(action.tool_args)
@@ -313,6 +345,28 @@ class BrowserService:
                 feedback.status = "SUCCESS"
                 feedback.message = f"Screenshot saved to: {screenshot_path}"
 
+            elif action.tool_name == "download_page":
+                task_topic = action.tool_args.get("task_topic", "web_page")
+                path = save_current_page_html(self.page, task_topic=task_topic)
+                feedback.status = "SUCCESS"
+                feedback.message = f"Page HTML saved to: {path}"
+
+            elif action.tool_name == "download_link":
+                task_topic = action.tool_args.get("task_topic", "download")
+                url = action.tool_args.get("url")
+                selector = None
+                if not url and any(k in action.tool_args for k in ("selector", "xpath", "text_content", "container_selector")):
+                    selector = self._get_selector(action.tool_args)
+
+                path = download_from_link(
+                    page=self.page,
+                    task_topic=task_topic,
+                    url=url,
+                    selector=selector,
+                )
+                feedback.status = "SUCCESS"
+                feedback.message = f"Downloaded content saved to: {path}"
+
             elif action.tool_name == "click_nth":
                 selector = self._get_selector(action.tool_args)
                 index = int(action.tool_args.get("index", 0))
@@ -356,10 +410,16 @@ class BrowserService:
                 
                 # 2. 预期导航发生并执行点击
                 # 这一步会等待 URL 变化或页面加载完成。
-                with self.page.expect_navigation(timeout=timeout_ms):
+                # 如果点击不导致导航，expect_navigation 会超时，所以用 try-except 处理
+                try:
+                    with self.page.expect_navigation(timeout=timeout_ms):
+                        self.page.click(selector, timeout=timeout_ms)
+                except TimeoutError:
+                    # 点击可能不导致导航（如按钮触发 AJAX），直接点击即可
                     self.page.click(selector, timeout=timeout_ms)
                 
-                # 如果代码执行到这里，说明导航成功完成
+                # 点击后可能跳转到登录页，做一次检测
+                self._maybe_wait_for_manual_login()
 
             elif action.tool_name == "open_notepad":
                 self._launch_notepad(action, feedback)

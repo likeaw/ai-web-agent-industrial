@@ -1,0 +1,292 @@
+warning: in the working copy of 'backend/src/agent/DecisionMaker.py', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --cc backend/src/agent/DecisionMaker.py[m
+[1mindex 04aec7f,f2bc57b..0000000[m
+[1m--- a/backend/src/agent/DecisionMaker.py[m
+[1m+++ b/backend/src/agent/DecisionMaker.py[m
+[36m@@@ -1,536 -1,536 +1,553 @@@[m
+[31m- # 文件: backend/src/agent/DecisionMaker.py[m
+[31m- [m
+[31m- import os[m
+[31m- import sys[m
+[31m- import tempfile[m
+[31m- import time[m
+[31m- import uuid[m
+[31m- from typing import Optional[m
+[31m- from dotenv import load_dotenv[m
+[31m- [m
+[31m- # --- 核心模块引入 ---[m
+[31m- from backend.src.agent.Planner import DynamicExecutionGraph[m
+[31m- from backend.src.services.LLMAdapter import LLMAdapter[m
+[31m- from backend.src.visualization.VisualizationAdapter import VisualizationAdapter[m
+[31m- [m
+[31m- # 工具层（本地工具）[m
+[31m- from backend.src.tools.local_tools import launch_notepad[m
+[31m- # 路径与临时文件管理[m
+[31m- from backend.src.utils.path_utils import build_temp_file_path[m
+[31m- # 引入真实浏览器服务[m
+[31m- from backend.src.services.BrowserService import BrowserService[m
+[31m- [m
+[31m- # --- 数据模型 ---[m
+[31m- from backend.src.data_models.decision_engine.decision_models import ([m
+[31m-     TaskGoal, WebObservation, ExecutionNode, ExecutionNodeStatus, DecisionAction, ActionFeedback[m
+[31m- )[m
+[31m- [m
+[31m- # 加载环境变量 (确保在任何逻辑执行前加载)[m
+[31m- load_dotenv()[m
+[31m- [m
+[31m- class DecisionMaker:[m
+[31m-     """[m
+[31m-     决策执行者 (DecisionMaker) - 工业级实现[m
+[31m-     [m
+[31m-     职责：[m
+[31m-     1. 生命周期管理：负责 BrowserService 的初始化与安全销毁。[m
+[31m-     2. 执行流编排：驱动 Planner 进行节点流转。[m
+[31m-     3. 异常熔断：在关键路径失败时执行剪枝或终止策略。[m
+[31m-     4. 可视化审计：在每一步操作后生成状态快照。[m
+[31m-     """[m
+[31m- [m
+[31m-     def __init__(self, task_goal: TaskGoal, headless: bool = True):[m
+[31m-         """[m
+[31m-         初始化决策引擎。[m
+[31m-         [m
+[31m-         :param task_goal: 任务目标对象。[m
+[31m-         :param headless: 浏览器运行模式。生产环境通常为 True，调试环境可配置为 False。[m
+[31m-         """[m
+[31m-         self.task_goal = task_goal[m
+[31m-         self.headless = headless[m
+[31m-         [m
+[31m-         # 初始化组件[m
+[31m-         self.planner = DynamicExecutionGraph()[m
+[31m-         self.browser_service: Optional[BrowserService] = None[m
+[31m-         [m
+[31m-         # 运行时状态[m
+[31m-         self.is_running = False[m
+[31m-         self.current_node: Optional[ExecutionNode] = None[m
+[31m-         self.execution_counter = 0 [m
+[31m- [m
+[31m-     def _init_browser(self):[m
+[31m-         """延迟初始化浏览器资源，仅在 run 开始时调用。"""[m
+[31m-         if not self.browser_service:[m
+[31m-             try:[m
+[31m-                 print(f"--- [System] Initializing BrowserService (Headless: {self.headless}) ---")[m
+[31m-                 self.browser_service = BrowserService(headless=self.headless)[m
+[31m-             except Exception as e:[m
+[31m-                 print(f"!!! [CRITICAL] Failed to initialize BrowserService: {e}")[m
+[31m-                 raise RuntimeError("Browser initialization failed.") from e[m
+[31m- [m
+[31m-     def close(self):[m
+[31m-         """资源清理钩子，确保浏览器进程不残留。"""[m
+[31m-         if self.browser_service:[m
+[31m-             print("--- [System] Closing BrowserService ---")[m
+[31m-             try:[m
+[31m-                 self.browser_service.close()[m
+[31m-             except Exception as e:[m
+[31m-                 print(f"[WARN] Error during browser closure: {e}")[m
+[31m-             finally:[m
+[31m-                 self.browser_service = None[m
+[31m- [m
+[31m-     def _execute_action(self, action: DecisionAction) -> WebObservation:[m
+[31m-         """[m
+[31m-         执行原子操作。[m
+[31m-         """[m
+[31m-         self.execution_counter += 1[m
+[31m-         # 结构化日志[m
+[31m-         print(f"\n>>> [STEP {self.execution_counter}] Executing Tool: [{action.tool_name}]")[m
+[31m-         try:[m
+[31m-             # 1. 纯本地工具：不需要浏览器（如 open_notepad）[m
+[31m-             if action.tool_name == "open_notepad":[m
+[31m-                 file_path = action.tool_args.get("file_path")[m
+[31m-                 initial_content = action.tool_args.get("initial_content", "")[m
+[31m- [m
+[31m-                 # 统一获取“最近一次提取结果”的文本形式（每行一个标题）[m
+[31m-                 titles_text: Optional[str] = None[m
+[31m-                 if hasattr(self.planner, "nodes_execution_order"):[m
+[31m-                     from ast import literal_eval[m
+[31m- [m
+[31m-                     for nid in reversed(self.planner.nodes_execution_order):[m
+[31m-                         node = self.planner.nodes.get(nid)[m
+[31m-                         if not node:[m
+[31m-                             continue[m
+[31m-                         if getattr(node, "resolved_output", None):[m
+[31m-                             raw_output = str(node.resolved_output)[m
+[31m-                             if raw_output.startswith("Extracted") and ":" in raw_output:[m
+[31m-                                 try:[m
+[31m-                                     list_part = raw_output.split(":", 1)[1].strip()[m
+[31m-                                     titles = literal_eval(list_part)[m
+[31m-                                     if isinstance(titles, list) and titles:[m
+[31m-                                         titles_text = "\n".join(str(t) for t in titles)[m
+[31m-                                     else:[m
+[31m-                                         titles_text = raw_output[m
+[31m-                                 except Exception:[m
+[31m-                                     titles_text = raw_output[m
+[31m-                             else:[m
+[31m-                                 titles_text = raw_output[m
+[31m-                             print(f"[LOCAL TOOL] Found resolved_output from node {nid} for notepad content.")[m
+[31m-                             break[m
+[31m- [m
+[31m-                 # 逻辑简化：一旦有提取结果，就完全覆盖 initial_content，避免占位符残留[m
+[31m-                 if titles_text:[m
+[31m-                     initial_content = titles_text[m
+[31m- [m
+[31m-                 # 统一：所有记事本类临时文件写入到项目根目录 temp/notes 下，按任务主题+时间命名[m
+[31m-                 if not file_path:[m
+[31m-                     file_path = build_temp_file_path([m
+[31m-                         file_type="notes",[m
+[31m-                         task_topic=self.task_goal.target_description,[m
+[31m-                         extension=".txt",[m
+[31m-                     )[m
+[31m- [m
+[31m-                 target_path, ok, msg = launch_notepad(file_path, initial_content)[m
+[31m- [m
+[31m-                 fb = ActionFeedback([m
+[31m-                     status="SUCCESS" if ok else "FAILED",[m
+[31m-                     error_code="0" if ok else "NOTEPAD_LAUNCH_ERROR",[m
+[31m-                     message=msg,[m
+[31m-                 )[m
+[31m- [m
+[31m-                 observation = WebObservation([m
+[31m-                     observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),[m
+[31m-                     current_url="local://notepad",[m
+[31m-                     http_status_code=200 if fb.status == "SUCCESS" else 500,[m
+[31m-                     page_load_time_ms=0,[m
+[31m-                     is_authenticated=False,[m
+[31m-                     key_elements=[],[m
+[31m-                     screenshot_available=False,[m
+[31m-                     last_action_feedback=fb,[m
+[31m-                     memory_context="Local tool execution (open_notepad).",[m
+[31m-                 )[m
+[31m- [m
+[31m-             else:[m
+[31m-                 # 2. 需要浏览器的工具：按需延迟初始化 BrowserService[m
+[31m-                 if not self.browser_service:[m
+[31m-                     self._init_browser()[m
+[31m- [m
+[31m-                 observation = self.browser_service.execute_action(action)[m
+[31m- [m
+[31m-             # 简单的结果摘要[m
+[31m-             fb = observation.last_action_feedback[m
+[31m-             status_icon = "✅" if fb and fb.status == "SUCCESS" else "❌"[m
+[31m-             print([m
+[31m-                 f"    {status_icon} Result: {fb.status if fb else 'NO FEEDBACK'} | "[m
+[31m-                 f"HTTP: {observation.http_status_code} | URL: {observation.current_url}"[m
+[31m-             )[m
+[31m- [m
+[31m-             if fb and fb.status == "FAILED":[m
+[31m-                 print(f"    ⚠️ Error Details: {fb.message}")[m
+[31m- [m
+[31m-             return observation[m
+[31m- [m
+[31m-         except Exception as e:[m
+[31m-             print(f"!!! [CRITICAL] Unhandled Exception in Action Execution: {e}")[m
+[31m-             # 返回兜底的失败观测，防止程序崩溃，允许 Planner 尝试恢复[m
+[31m-             return WebObservation([m
+[31m-                 observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),[m
+[31m-                 current_url="unknown",[m
+[31m-                 http_status_code=500,[m
+[31m-                 page_load_time_ms=0,[m
+[31m-                 is_authenticated=False,[m
+[31m-                 key_elements=[],[m
+[31m-                 screenshot_available=False,[m
+[31m-                 memory_context="System Critical Failure",[m
+[31m-                 last_action_feedback=ActionFeedback([m
+[31m-                     status="FAILED", error_code="SYSTEM_EXCEPTION", message=str(e)[m
+[31m-                 ),[m
+[31m-             )[m
+[31m- [m
+[31m-     def _handle_execution_result(self, node: ExecutionNode, observation: WebObservation) -> bool:[m
+[31m-         """[m
+[31m-         处理执行结果：成功则继续，失败则触发 LLM 动态重规划 (Self-Correction)。[m
+[31m-         """[m
+[31m-         # [修改点 1] 直接赋值，现在 ExecutionNode 中已包含 last_observation 字段[m
+[31m-         node.last_observation = observation # 存储最新的观测，用于可视化和重规划[m
+[31m- [m
+[31m-         feedback = observation.last_action_feedback[m
+[31m-         if not feedback:[m
+[31m-             # 如果没有反馈，视为失败，防止空指针异常[m
+[31m-             feedback = ActionFeedback(status="FAILED", error_code="NO_FEEDBACK", message="Action execution returned no feedback.")[m
+[31m- [m
+[31m-         # 1. 成功情况[m
+[31m-         if feedback.status == 'SUCCESS':[m
+[31m-             node.current_status = ExecutionNodeStatus.SUCCESS[m
+[31m-             print(f"    [PLAN] Node {node.node_id} COMPLETED. Graph updated.")[m
+[31m-             return True[m
+[31m-         [m
+[31m-         # 2. 失败情况处理[m
+[31m-         print(f"!!! [FAILURE] Node {node.node_id} failed. Reason: {feedback.message}")[m
+[31m-         self.planner.prune_on_failure(node.node_id, feedback.message)[m
+[31m-         [m
+[31m-         # 检查节点的失败策略[m
+[31m-         if node.action.on_failure_action == "STOP_TASK":[m
+[31m-             print(f"!!! Strategy is STOP_TASK. Halting execution.")[m
+[31m-             node.current_status = ExecutionNodeStatus.FAILED[m
+[31m-             return False[m
+[31m-             [m
+[31m-         elif node.action.on_failure_action == "RE_EVALUATE":[m
+[31m-             print(f"--- [RE-PLANNING] Initiating Dynamic Correction for Node {node.node_id} ---")[m
+[31m-             [m
+[31m-             # A. 构造纠错上下文[m
+[31m-             # 我们创建一个临时的 Goal，明确告诉 LLM 发生了什么错误[m
+[31m-             correction_goal = self.task_goal.model_copy() # 需要 Pydantic 的 copy 方法[m
+[31m-             correction_goal.target_description = ([m
+[31m-                 f"ORIGINAL GOAL: {self.task_goal.target_description}\n"[m
+[31m-                 f"CONTEXT: The step '{node.action.tool_name}' FAILED.\n"[m
+[31m-                 f"ERROR MESSAGE: {feedback.message}\n"[m
+[31m-                 f"TASK: Generate a short corrective plan (1-3 steps) to fix this error and achieve the original goal."[m
+[31m-             )[m
+[31m-             [m
+[31m-             # B. 调用 LLM 生成纠错片段[m
+[31m-             # 注意：传入当前的 observation，这样 LLM 可以看到报错后的页面状态[m
+[31m-             try:[m
+[31m-                 print(f"    [LLM] Requesting correction plan...")[m
+[31m-                 correction_nodes = LLMAdapter.generate_nodes(correction_goal, observation)[m
+[31m-                 [m
+[31m-                 if correction_nodes:[m
+[31m-                     # C. 注入新计划[m
+[31m-                     print(f"    [PLAN] Injecting {len(correction_nodes)} correction nodes...")[m
+[31m-                     self.planner.inject_correction_plan(node.node_id, correction_nodes)[m
+[31m-                     return True # 继续执行循环，下次会取到新注入的节点[m
+[31m-                 else:[m
+[31m-                     print("    [LLM] Returned empty correction plan. Cannot recover.")[m
+[31m-                     return False[m
+[31m-                     [m
+[31m-             except Exception as e:[m
+[31m-                 print(f"    [ERROR] Re-planning failed: {e}")[m
+[31m-                 return False[m
+[31m-                 [m
+[31m-         # 默认处理[m
+[31m-         node.current_status = ExecutionNodeStatus.FAILED[m
+[31m-         return True[m
+[31m- [m
+[31m-     def _save_visualization(self, suffix: str):[m
+[31m-         """生成可视化快照"""[m
+[31m-         filename = f"plan_{self.task_goal.task_uuid}_{suffix}"[m
+[31m-         try:[m
+[31m-             # 渲染图[m
+[31m-             output_dir = 'logs/graphs'[m
+[31m-             os.makedirs(output_dir, exist_ok=True)[m
+[31m-             content = VisualizationAdapter.render_graph_to_html_string(self.planner, filename)[m
+[31m-             [m
+[31m-             # 写入文件[m
+[31m-             with open(os.path.join(output_dir, f"{filename}.html"), 'w', encoding='utf-8') as f:[m
+[31m-                 f.write(content)[m
+[31m-         except Exception as e:[m
+[31m-             print(f"[WARN] Visualization failed: {e}")[m
+[31m- [m
+[31m-     def _resolve_dynamic_args(self, node: ExecutionNode) -> DecisionAction:[m
+[31m-         """[m
+[31m-         动态参数替换方法：将 {result_of:NODE_ID} 模式替换为实际的执行结果。[m
+[31m-         此方法在执行前调用，处理动态依赖。[m
+[31m-         """[m
+[31m-         resolved_args = node.action.tool_args.copy()[m
+[31m-         [m
+[31m-         # 遍历所有参数，检查是否包含动态引用[m
+[31m-         for key, value in node.action.tool_args.items():[m
+[31m-             if isinstance(value, str) and value.startswith("{result_of:") and value.endswith("}"):[m
+[31m-                 source_node_id = value[len("{result_of:"):-1][m
+[31m-                 [m
+[31m-                 # 检查源节点是否存在且已执行成功[m
+[31m-                 source_node = self.planner.nodes.get(source_node_id)[m
+[31m-                 if not source_node or source_node.current_status != ExecutionNodeStatus.SUCCESS:[m
+[31m-                     raise ValueError(f"Dynamic argument source node '{source_node_id}' not found or not successful (Status: {source_node.current_status.name if source_node else 'Not Found'}).")[m
+[31m-                 [m
+[31m-                 # �

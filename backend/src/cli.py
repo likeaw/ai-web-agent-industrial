@@ -88,6 +88,8 @@ def _create_task_goal(description: str) -> TaskGoal:
             "take_screenshot",
             "click_nth",
             "find_link_by_text",
+            "download_page",
+            "download_link",
         ],
     )
 

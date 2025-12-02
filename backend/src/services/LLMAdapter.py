@@ -59,6 +59,8 @@ class LLMAdapter:
             "4. 当需要保存当前页面截图时，请使用 take_screenshot，tool_args 至少包含 task_topic(字符串)，可选 filename 和 full_page(bool)。"
             "5. 当需要点击搜索结果或重复元素列表中的第 N 个元素时，请使用 click_nth，tool_args 中包含 selector/xpath/text_content 以及 index(从0开始)。"
             "6. 当需要按文本模糊匹配链接时，请使用 find_link_by_text，tool_args 中包含 keyword(字符串) 和可选 limit(整数，默认5)。"
+            "7. 当需要保存当前页面 HTML 源码时，请使用 download_page，tool_args 中包含 task_topic(字符串，用于生成文件名)。"
+            "8. 当需要下载链接中的内容时，请使用 download_link，tool_args 可以包含 url(直接下载) 或 selector/xpath/text_content(从页面元素读取 href)，以及 task_topic(字符串)。"
         )
 
         system_prompt = (
@@ -102,15 +104,8 @@ class LLMAdapter:
             print("ERROR: LLM API Key missing. Cannot generate dynamic plan.")
             return []
             
-        print(f"--- Calling LLM ({LLMAdapter.MODEL_NAME}) at URL: {LLMAdapter.API_URL} ---")
-        
         json_schema = LLMAdapter._create_json_schema()
         payload = LLMAdapter._create_api_payload(goal, observation, json_schema)
-        
-        print("--- DEBUG: Full Request Payload (for debugging JSON Schema) ---")
-        payload_str = json.dumps(payload, indent=2, ensure_ascii=False)
-        print(payload_str[:500] + "..." if len(payload_str) > 500 else payload_str)
-        print("-----------------------------------------------------------------")
         
         headers = {
             "Authorization": f"Bearer {LLMAdapter.API_KEY}",
@@ -164,10 +159,4 @@ class LLMAdapter:
         except (KeyError, json.JSONDecodeError, ValueError) as e:
             # ... (错误处理保持不变)
             print(f"API Response Parsing FAILED (LLM output format error/Pydantic validation): {e}")
-            
-            try:
-                print(f"DEBUG: Raw LLM response content: {response.text}")
-            except:
-                pass
-            print(f"DEBUG: Payload JSON Schema was enforced: {json.dumps(json_schema, indent=2)}")
             return []
