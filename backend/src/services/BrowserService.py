@@ -1,5 +1,6 @@
 # 文件: backend/src/services/BrowserService.py
 
+import json
 import os
 import subprocess
 import tempfile
@@ -118,6 +119,36 @@ class BrowserService:
                 return f"*:has-text('{text}')"
             
         raise ValueError(f"JSON Error: No valid selector provided in args: {args.keys()}")
+
+    def _perform_pre_actions(self, actions: List[Dict[str, Any]], timeout_ms: int) -> None:
+        """
+        在执行特定工具（如 extract_data）前，执行一组简单的页面交互操作。
+        支持 click/scroll/wait，便于在提取前唤起或加载更多内容。
+        """
+        for idx, pre_action in enumerate(actions):
+            action_type = (pre_action or {}).get("type")
+            if not action_type:
+                continue
+
+            try:
+                if action_type == "click":
+                    selector = self._get_selector(pre_action)
+                    self.page.wait_for_selector(selector, state="visible", timeout=timeout_ms)
+                    self.page.click(selector, timeout=timeout_ms)
+                elif action_type == "scroll":
+                    direction = pre_action.get("direction", "down")
+                    amount = int(pre_action.get("amount", 800))
+                    if direction == "down":
+                        self.page.mouse.wheel(0, abs(amount))
+                    else:
+                        self.page.mouse.wheel(0, -abs(amount))
+                elif action_type == "wait":
+                    duration = float(pre_action.get("duration", 1))
+                    time.sleep(max(0.0, duration))
+                else:
+                    print(f"[BrowserService] Unknown pre_action '{action_type}' ignored.")
+            except Exception as exc:
+                print(f"[BrowserService] pre_action #{idx} ({action_type}) failed: {exc}")
 
     # 在 BrowserService 类中新增一个方法，用于执行后的验证
     def _verify_post_action(self, action: DecisionAction, initial_url: str) -> bool:
@@ -304,6 +335,7 @@ class BrowserService:
                 selector = action.tool_args.get("selector")
                 attribute = action.tool_args.get("attribute", "text")  # 默认提取元素的文本
                 limit = action.tool_args.get("limit", 3)  # 默认提取前三条
+                pre_actions = action.tool_args.get("pre_actions", [])
 
                 if not selector:
                     # 回退到通用选择器解析逻辑（支持 xpath / text_content 等）
@@ -311,6 +343,9 @@ class BrowserService:
                         selector = self._get_selector(action.tool_args)
                     except Exception:
                         selector = None
+
+                if isinstance(pre_actions, list) and pre_actions:
+                    self._perform_pre_actions(pre_actions, timeout_ms)
 
                 # 具体提取逻辑委托给 browser_tools，便于单独维护
                 results = extract_search_results(
@@ -323,7 +358,11 @@ class BrowserService:
 
                 if results:
                     feedback.status = "SUCCESS"
-                    summary = f"Extracted {len(results)} items: {results}"
+                    payload = {
+                        "result_type": "link_list",
+                        "items": results,
+                    }
+                    summary = json.dumps(payload, ensure_ascii=False)
                     print(f"[BrowserService] extract_data -> {summary}")
                     feedback.message = summary
                 else:
