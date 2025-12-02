@@ -1,24 +1,37 @@
-# Python cache files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
+venv/
+env/
+ENV/
+.venv
 
-# Environment variables
-.env
-.env.local
+# Project specific
+logs/
+temp/
+*.log
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Built-in Python (large binary files)
+python/
+!python/.gitkeep
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs and temp files (optional - uncomment if you don't want to track these)
-# logs/
-# temp/
-
+# Playwright
+.playwright/

@@ -1,0 +1,49 @@
+.custom-node {
+  padding: 10px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  min-width: 180px;
+  transition: all 0.3s;
+}
+
+.custom-node.selected {
+  box-shadow: 0 4px 12px rgba(24, 144, 255, 0.4);
+  transform: scale(1.05);
+}
+
+.node-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.node-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.node-label {
+  font-weight: 600;
+  font-size: 14px;
+  color: #262626;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-info {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.info-item {
+  white-space: nowrap;
+}
+

@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 from collections import deque
 from backend.src.services.LLMAdapter import LLMAdapter 
 from backend.src.data_models.decision_engine.decision_models import (
-    ExecutionNode, ExecutionNodeStatus, TaskGoal, DecisionAction
+    ExecutionNode, ExecutionNodeStatus, TaskGoal, DecisionAction, WebObservation
 )
 
 class DynamicExecutionGraph:

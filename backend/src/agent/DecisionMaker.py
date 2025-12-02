@@ -19,6 +19,20 @@ from backend.src.visualization.VisualizationAdapter import VisualizationAdapter
 
 # 工具层（本地工具）
 from backend.src.tools.local_tools import launch_notepad
+# 系统操作工具
+from backend.src.tools.system import (
+    create_directory,
+    delete_file_or_directory,
+    list_directory,
+    read_file_content,
+    write_file_content,
+    is_dangerous_operation,
+    create_word_document,
+    create_excel_document,
+    create_powerpoint_document,
+    create_office_document,
+    resolve_user_path,
+)
 # 路径与临时文件管理
 from backend.src.utils.path_utils import build_temp_file_path
 # 引入真实浏览器服务
@@ -46,15 +60,17 @@ class DecisionMaker:
     4. 可视化审计：在每一步操作后生成状态快照。
     """
 
-    def __init__(self, task_goal: TaskGoal, headless: bool = True):
+    def __init__(self, task_goal: TaskGoal, headless: bool = True, confirm_callback=None):
         """
         初始化决策引擎。
         
         :param task_goal: 任务目标对象。
         :param headless: 浏览器运行模式。生产环境通常为 True，调试环境可配置为 False。
+        :param confirm_callback: 危险操作确认回调函数，签名为 (tool_name: str, reason: str) -> bool。
         """
         self.task_goal = task_goal
         self.headless = headless
+        self.confirm_callback = confirm_callback
         
         # 初始化组件
         self.planner = DynamicExecutionGraph()
@@ -86,6 +102,77 @@ class DecisionMaker:
             finally:
                 self.browser_service = None
 
+    def _build_local_observation(
+        self,
+        domain: str,
+        feedback: ActionFeedback,
+        memory_context: str,
+        status_code: int = 400,
+    ) -> WebObservation:
+        """构造本地操作的观测对象。"""
+        return WebObservation(
+            observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            current_url=domain,
+            http_status_code=status_code,
+            page_load_time_ms=0,
+            is_authenticated=False,
+            key_elements=[],
+            screenshot_available=False,
+            last_action_feedback=feedback,
+            memory_context=memory_context,
+        )
+
+    def _confirm_storage_operation(
+        self,
+        tool_name: str,
+        raw_path: str,
+        domain: str,
+        context: str,
+    ) -> Optional[WebObservation]:
+        """
+        存储/写入操作前的路径确认逻辑。
+
+        如果 CLI 提供 confirm 回调，则展示实际写入路径并要求确认。
+        """
+        if not raw_path:
+            fb = ActionFeedback(
+                status="FAILED",
+                error_code="PATH_REQUIRED",
+                message="Storage operation requires a non-empty 'path' parameter.",
+            )
+            return self._build_local_observation(domain, fb, context)
+
+        if not self.confirm_callback:
+            # 无需确认（例如前端或 API 模式）
+            return None
+
+        try:
+            resolved_path = resolve_user_path(raw_path)
+        except ValueError as exc:
+            fb = ActionFeedback(
+                status="FAILED",
+                error_code="INVALID_PATH",
+                message=f"Invalid path: {exc}",
+            )
+            return self._build_local_observation(domain, fb, context)
+
+        confirm_message = (
+            "[STORAGE]\n"
+            f"操作: {tool_name}\n"
+            f"目标路径: {resolved_path}\n"
+            "说明: 此操作会在本地创建/写入上述路径。"
+        )
+        confirmed = self.confirm_callback(tool_name, confirm_message)
+        if not confirmed:
+            fb = ActionFeedback(
+                status="FAILED",
+                error_code="USER_CANCELLED",
+                message=f"User cancelled storage operation: {resolved_path}",
+            )
+            return self._build_local_observation(domain, fb, context, status_code=403)
+
+        return None
+
     def _execute_action(self, action: DecisionAction) -> WebObservation:
         """
         执行原子操作。
@@ -93,7 +180,144 @@ class DecisionMaker:
         self.execution_counter += 1
         try:
             # 1. 纯本地工具：不需要浏览器（如 open_notepad）
-            if action.tool_name == "open_notepad":
+            # 1.1 系统操作工具（文件/文件夹操作）
+            if action.tool_name in [
+                "create_directory",
+                "delete_file_or_directory",
+                "list_directory",
+                "read_file_content",
+                "write_file_content",
+            ]:
+                # 检查是否为危险操作
+                is_dangerous, danger_reason = is_dangerous_operation(action.tool_name, action.tool_args)
+                
+                if is_dangerous:
+                    # 需要用户确认
+                    if self.confirm_callback:
+                        confirmed = self.confirm_callback(action.tool_name, danger_reason or "Unknown risk")
+                        if not confirmed:
+                            fb = ActionFeedback(
+                                status="FAILED",
+                                error_code="USER_CANCELLED",
+                                message=f"User cancelled dangerous operation: {danger_reason}",
+                            )
+                            observation = WebObservation(
+                                observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                current_url="local://system",
+                                http_status_code=403,
+                                page_load_time_ms=0,
+                                is_authenticated=False,
+                                key_elements=[],
+                                screenshot_available=False,
+                                last_action_feedback=fb,
+                                memory_context="System operation cancelled by user.",
+                            )
+                            return observation
+                    else:
+                        # 没有确认回调，直接拒绝危险操作
+                        fb = ActionFeedback(
+                            status="FAILED",
+                            error_code="NO_CONFIRM_CALLBACK",
+                            message=f"Dangerous operation requires confirmation, but no callback provided: {danger_reason}",
+                        )
+                        observation = WebObservation(
+                            observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            current_url="local://system",
+                            http_status_code=403,
+                            page_load_time_ms=0,
+                            is_authenticated=False,
+                            key_elements=[],
+                            screenshot_available=False,
+                            last_action_feedback=fb,
+                            memory_context="System operation rejected (no confirmation).",
+                        )
+                        return observation
+
+                storage_ops = {"create_directory", "write_file_content"}
+                if action.tool_name in storage_ops and not is_dangerous:
+                    confirmation_obs = self._confirm_storage_operation(
+                        action.tool_name,
+                        action.tool_args.get("path", ""),
+                        "local://system",
+                        f"System storage operation: {action.tool_name}",
+                    )
+                    if confirmation_obs:
+                        return confirmation_obs
+
+                # 执行系统操作
+                if action.tool_name == "create_directory":
+                    path = action.tool_args.get("path", "")
+                    ok, msg = create_directory(path)
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "CREATE_DIR_ERROR",
+                        message=msg,
+                    )
+                elif action.tool_name == "delete_file_or_directory":
+                    path = action.tool_args.get("path", "")
+                    recursive = action.tool_args.get("recursive", False)
+                    ok, msg = delete_file_or_directory(path, recursive=recursive)
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "DELETE_ERROR",
+                        message=msg,
+                    )
+                elif action.tool_name == "list_directory":
+                    path = action.tool_args.get("path", ".")
+                    show_hidden = action.tool_args.get("show_hidden", False)
+                    ok, msg, items = list_directory(path, show_hidden=show_hidden)
+                    if ok and items:
+                        result_msg = f"{msg}\n\n" + "\n".join(items)
+                    else:
+                        result_msg = msg
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "LIST_DIR_ERROR",
+                        message=result_msg,
+                    )
+                elif action.tool_name == "read_file_content":
+                    path = action.tool_args.get("path", "")
+                    max_size = action.tool_args.get("max_size", 1024 * 1024)
+                    ok, msg, content = read_file_content(path, max_size=max_size)
+                    if ok and content:
+                        result_msg = f"{msg}\n\nContent:\n{content}"
+                    else:
+                        result_msg = msg
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "READ_FILE_ERROR",
+                        message=result_msg,
+                    )
+                elif action.tool_name == "write_file_content":
+                    path = action.tool_args.get("path", "")
+                    content = action.tool_args.get("content", "")
+                    append = action.tool_args.get("append", False)
+                    ok, msg = write_file_content(path, content, append=append)
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "WRITE_FILE_ERROR",
+                        message=msg,
+                    )
+                else:
+                    fb = ActionFeedback(
+                        status="FAILED",
+                        error_code="UNKNOWN_SYSTEM_TOOL",
+                        message=f"Unknown system tool: {action.tool_name}",
+                    )
+
+                observation = WebObservation(
+                    observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    current_url="local://system",
+                    http_status_code=200 if fb.status == "SUCCESS" else 500,
+                    page_load_time_ms=0,
+                    is_authenticated=False,
+                    key_elements=[],
+                    screenshot_available=False,
+                    last_action_feedback=fb,
+                    memory_context=f"System operation: {action.tool_name}",
+                )
+
+            elif action.tool_name == "open_notepad":
                 file_path = action.tool_args.get("file_path")
                 initial_content = action.tool_args.get("initial_content", "")
 
@@ -152,6 +376,110 @@ class DecisionMaker:
                     screenshot_available=False,
                     last_action_feedback=fb,
                     memory_context="Local tool execution (open_notepad).",
+                )
+
+            # 1.3 Office 文档操作工具
+            elif action.tool_name in [
+                "create_word_document",
+                "create_excel_document",
+                "create_powerpoint_document",
+                "create_office_document",
+            ]:
+                # 检查是否为危险操作（覆盖已存在文件）
+                is_dangerous, danger_reason = is_dangerous_operation(action.tool_name, action.tool_args)
+                
+                if is_dangerous:
+                    if self.confirm_callback:
+                        confirmed = self.confirm_callback(action.tool_name, danger_reason or "Unknown risk")
+                        if not confirmed:
+                            fb = ActionFeedback(
+                                status="FAILED",
+                                error_code="USER_CANCELLED",
+                                message=f"User cancelled dangerous operation: {danger_reason}",
+                            )
+                            observation = WebObservation(
+                                observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                current_url="local://office",
+                                http_status_code=403,
+                                page_load_time_ms=0,
+                                is_authenticated=False,
+                                key_elements=[],
+                                screenshot_available=False,
+                                last_action_feedback=fb,
+                                memory_context="Office document operation cancelled by user.",
+                            )
+                            return observation
+
+                if not is_dangerous:
+                    confirmation_obs = self._confirm_storage_operation(
+                        action.tool_name,
+                        action.tool_args.get("path", ""),
+                        "local://office",
+                        f"Office document operation: {action.tool_name}",
+                    )
+                    if confirmation_obs:
+                        return confirmation_obs
+
+                # 执行 Office 文档操作
+                if action.tool_name == "create_word_document":
+                    path = action.tool_args.get("path", "")
+                    content = action.tool_args.get("content")
+                    title = action.tool_args.get("title")
+                    ok, msg = create_word_document(path, content=content, title=title)
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "CREATE_WORD_ERROR",
+                        message=msg,
+                    )
+                elif action.tool_name == "create_excel_document":
+                    path = action.tool_args.get("path", "")
+                    data = action.tool_args.get("data")  # List[List[Any]]
+                    sheet_name = action.tool_args.get("sheet_name", "Sheet1")
+                    headers = action.tool_args.get("headers")  # List[str]
+                    ok, msg = create_excel_document(path, data=data, sheet_name=sheet_name, headers=headers)
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "CREATE_EXCEL_ERROR",
+                        message=msg,
+                    )
+                elif action.tool_name == "create_powerpoint_document":
+                    path = action.tool_args.get("path", "")
+                    slides = action.tool_args.get("slides")  # List[Dict]
+                    title = action.tool_args.get("title")
+                    ok, msg = create_powerpoint_document(path, slides=slides, title=title)
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "CREATE_PPT_ERROR",
+                        message=msg,
+                    )
+                elif action.tool_name == "create_office_document":
+                    file_type = action.tool_args.get("file_type", "")
+                    path = action.tool_args.get("path", "")
+                    # 传递其他参数
+                    kwargs = {k: v for k, v in action.tool_args.items() if k not in ["file_type", "path"]}
+                    ok, msg = create_office_document(file_type, path, **kwargs)
+                    fb = ActionFeedback(
+                        status="SUCCESS" if ok else "FAILED",
+                        error_code="0" if ok else "CREATE_OFFICE_ERROR",
+                        message=msg,
+                    )
+                else:
+                    fb = ActionFeedback(
+                        status="FAILED",
+                        error_code="UNKNOWN_OFFICE_TOOL",
+                        message=f"Unknown Office tool: {action.tool_name}",
+                    )
+
+                observation = WebObservation(
+                    observation_timestamp_utc=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    current_url="local://office",
+                    http_status_code=200 if fb.status == "SUCCESS" else 500,
+                    page_load_time_ms=0,
+                    is_authenticated=False,
+                    key_elements=[],
+                    screenshot_available=False,
+                    last_action_feedback=fb,
+                    memory_context=f"Office document operation: {action.tool_name}",
                 )
 
             else:
@@ -498,9 +826,24 @@ if __name__ == '__main__':
             "scroll",
             "wait",
             "extract_data",
-            "get_attribute",
+            "get_element_attribute",
             "open_notepad",
             "take_screenshot",
+            "click_nth",
+            "find_link_by_text",
+            "download_page",
+            "download_link",
+            # 系统操作工具
+            "create_directory",
+            "delete_file_or_directory",
+            "list_directory",
+            "read_file_content",
+            "write_file_content",
+            # Office 文档工具
+            "create_word_document",
+            "create_excel_document",
+            "create_powerpoint_document",
+            "create_office_document",
             "click_nth",
             "find_link_by_text",
             "download_page",

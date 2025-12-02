@@ -1,90 +1,60 @@
-## ai-web-agent-industrial：工业级自主 Web Agent 框架
+<div align="center">
+  <img src="./docs/images/header.svg" width="100%" alt="AI Web Agent Banner" />
+</div>
 
-### 🚀 项目概述
+<div align="center">
 
-本项目是一个 **工业级 Web 自动化 AI Agent 框架**，用于替代人工执行“打开网站、搜索、点击、提取数据、记录到记事本/文件”等重复性网页操作，并保证过程可审计、可回放、可扩展。  
-当前版本提供了一个基于 `rich` 的命令行对话前端，用户用自然语言描述任务，后端通过 **LLM + 动态执行图 (Dynamic Execution Graph)** 自动规划并驱动浏览器和本地工具执行。
+## ai-web-agent-industrial：面向实际业务的 Web 自动化 Agent
 
-**核心特性：**
+</div>
 
-- **工业级数据模型**：通过 Pydantic 定义 `TaskGoal` / `WebObservation` / `DecisionAction` / `ExecutionNode`，约束 LLM 输出，确保每一步操作可执行、可追踪。
-- **动态执行图 (DEG)**：使用 `DynamicExecutionGraph` 管理任务步骤及依赖，支持失败剪枝、动态纠错计划注入。
-- **浏览器自动化**：基于 Playwright 的 `BrowserService` 执行 `navigate_to` / `click_element` / `type_text` / `scroll` / `extract_data` 等操作。
-- **丰富工具层**：在 `backend/src/tools/` 中将“本地工具”和“浏览器工具”拆分为独立模块，便于按单个操作维护和扩展。
-- **可视化审计**：`VisualizationAdapter` 将 DEG 渲染为 Mermaid 图，并输出 HTML 报告到 `logs/graphs/`，便于复盘每次任务执行。
-- **统一临时文件管理**：所有由 Agent 生成的临时文件统一放在项目根目录 `temp/` 下，按类型（notes/screenshots/...）和任务主题+时间命名。
+### 🌟 项目定位
 
-更多面向开发者的细节，请参见 `docs/DEV_GUIDE.md`。
+`ai-web-agent-industrial` 是一个用于 **自动化网页操作与信息整理** 的 Web Agent 框架。  
+它希望解决的典型问题是：把日常「打开网站 → 搜索 → 点击 → 提取数据 → 记录到文件」这类枯燥重复操作，交给一个可配置、可回放、便于集成的 Agent 去做。
 
-### 🧱 项目结构总览
+当前版本主要提供一个基于 `rich` 的命令行前端：你用自然语言描述任务，Agent 通过 **LLM + 动态执行图 (Dynamic Execution Graph)** 来驱动浏览器和本地工具完成任务。
 
-```text
-ai-web-agent-industrial/
-├─ run_agent.cmd                 # Windows 一键启动 / 清理脚本
-├─ backend/
-│  └─ src/
-│     ├─ agent/
-│     │  ├─ DecisionMaker.py     # 决策执行者：拉起浏览器、驱动执行图、处理失败与纠错
-│     │  └─ Planner.py           # 动态执行图 DEG：节点管理、优先级调度、纠错计划注入
-│     ├─ data_models/
-│     │  └─ decision_engine/
-│     │     ├─ decision_models.py # Pydantic 数据模型：TaskGoal / WebObservation / DecisionAction / ExecutionNode
-│     │     └─ ai_agent_models.hpp # C++ 版本的数据结构定义（便于跨语言集成）
-│     ├─ services/
-│     │  ├─ BrowserService.py    # Playwright 浏览器适配层 + 工具调用入口
-│     │  └─ LLMAdapter.py        # LLM 调用封装 + JSON Schema 约束
-│     ├─ tools/
-│     │  ├─ local_tools.py       # 本地工具（例如：launch_notepad）
-│     │  └─ browser/             # 浏览器工具（每个操作一个文件）
-│     │     ├─ search_results.py # extract_search_results：搜索结果提取
-│     │     ├─ screenshot.py     # take_screenshot：分类存储截图
-│     │     ├─ click_nth.py      # click_nth_match：点击第 N 个匹配元素
-│     │     └─ find_link_by_text.py # find_link_by_text：按文本模糊匹配链接
-│     ├─ utils/
-│     │  └─ path_utils.py        # get_project_root / build_temp_file_path 等路径与 temp 管理工具
-│     ├─ visualization/
-│     │  └─ VisualizationAdapter.py # DEG → Mermaid HTML 渲染
-│     └─ cli.py                  # rich 命令行对话入口（推荐使用）
-├─ logs/
-│  └─ graphs/                    # 执行图可视化 HTML 报告（运行时自动生成）
-├─ temp/                         # 统一临时文件目录（运行时自动创建）
-│  ├─ notes/                     # 记事本/文本类输出
-│  └─ screenshots/               # 截图文件
-└─ docs/
-   └─ DEV_GUIDE.md               # 开发手册（项目结构与文件职责说明）
-```
+---
 
-### 🛠️ 安装与配置
+### ✨ 主要能力一览
 
-#### 1. 环境依赖
+- **自然语言驱动的网页操作**：打开页面、搜索、点击、滚动、输入文本、提取结构化信息等  
+- **结构化决策与可回放执行流程**：通过 Pydantic 数据模型组织任务目标、观测、动作与执行节点  
+- **浏览器与本地工具联动**：既能控制浏览器，也能调用本地应用或文件操作工具  
+- **可视化执行轨迹**：自动输出执行图 HTML，方便排查问题和复盘任务过程  
+- **统一的临时文件管理**：所有截图、笔记等输出统一归档到 `temp/` 目录下，便于清理和追踪
 
-- **操作系统**：Windows 10+（当前脚本和本地工具主要针对 Windows 做了适配）  
-- **Python**：3.9+  
-- **浏览器自动化**：Playwright (chromium)
+更细节的设计、模块说明与扩展方式已移入文档目录，方便独立查看。
 
-```bash
-# 克隆仓库
-git clone <your-repo-link>
-cd ai-web-agent-industrial
+---
 
-# 创建并激活虚拟环境（示例）
-python -m venv venv
-.\venv\Scripts\activate         # Windows
-# source venv/bin/activate      # Linux/macOS
+### 🎬 实机演示
 
-# 安装 Python 依赖
-pip install -r requirements.txt
+#### 文件操作
 
-# 安装 Playwright 浏览器驱动
-playwright install chromium
-```
+![CLI Demo](./docs/images/file_oprate_test.gif)
 
-#### 2. 配置环境变量
+#### 浏览器操作
 
-在项目根目录创建 `.env` 文件，用于配置 LLM 和浏览器模式等信息：
+![CLI Demo](./docs/images/web_oprate_test.gif)
+
+---
+
+### 🚀 快速开始
+
+#### 1. 准备环境
+
+- 建议在 **Windows 10+** 上使用（当前脚本和本地工具主要针对 Windows 做了适配）  
+- 推荐 **Python 3.10+**，也可以使用项目提供的内置 Python 环境
+
+如需详细的 Python/Playwright 安装步骤，可以参考文档：`docs/PYTHON_ENV_SETUP.md`。
+
+#### 2. 配置基础参数
+
+在项目根目录创建 `.env` 文件，配置你的 LLM Key 等信息（以 DeepSeek 为例）：
 
 ```dotenv
-# LLM 配置 (以 DeepSeek 为例)
 LLM_API_KEY="YOUR_LLM_API_KEY"
 LLM_MODEL_NAME="deepseek-chat"
 LLM_API_URL="https://api.deepseek.com/v1/chat/completions"
@@ -93,70 +63,52 @@ LLM_API_URL="https://api.deepseek.com/v1/chat/completions"
 BROWSER_HEADLESS=False
 ```
 
-### ▶️ 快速开始（推荐方式：命令行对话模式）
+#### 3. 启动命令行 Agent
 
-#### 1. 使用一键脚本启动
-
-在项目根目录执行（或直接双击）`run_agent.cmd`：
+在项目根目录执行（或双击脚本）：
 
 ```cmd
-cd ai-web-agent-industrial
 run_agent.cmd
 ```
 
-你会看到一个英文菜单：
+选择菜单中的 **1. Run CLI**，进入对话式命令行界面。  
+你可以尝试输入一些任务，例如：
 
-- **1**：Run CLI – 启动基于 `rich` 的对话式前端。  
-- **2**：Clean logs – 清理 `logs\` 目录。  
-- **3**：Clean temp – 清理 `temp\` 目录。  
-- **4**：Clean logs + temp – 同时清理日志和临时文件。  
-- **Q**：退出脚本。
+- 「搜索某个关键词，整理前几条结果标题到一个文本文件里」  
+- 「打开某个官网并截图保存到截图目录」  
+- 「在当前页面寻找包含某个关键词的链接，把链接都记录到记事本」  
 
-#### 2. 直接运行 CLI（等价于菜单 1）
+执行完成后，可以在：
 
-```bash
-python -m backend.src.cli
-```
+- `temp/notes/` 中查看生成的文本/记录文件  
+- `temp/screenshots/` 中查看截图  
+- `logs/graphs/` 中打开 HTML 查看整条执行路径
 
-在 CLI 中，你可以输入类似的自然语言指令，例如：
+---
 
-- “打开百度搜索 合肥，提取前三条搜索结果标题，然后把结果写到记事本里”  
-- “打开某个官网，截图当前页面并保存到截图目录”  
-- “在当前页面查找包含 ‘官网’ 字样的链接，并将这些链接记录到记事本”  
+### 📘 文档与深入了解
 
-Agent 会自动：
+- **开发与架构说明**：`docs/DEV_GUIDE.md`  
+- **内置 Python 环境配置**：`docs/PYTHON_ENV_SETUP.md`  
+- **项目结构、执行流程与调试细节（开发者视角）**：`docs/devloper/README.md`
 
-1. 将你的自然语言转换为 `TaskGoal`。  
-2. 通过 `LLMAdapter` 调用 LLM，根据 `allowed_actions` 规划出一系列 `ExecutionNode`。  
-3. 由 `DecisionMaker` 驱动 `BrowserService` 和 `tools/` 中的工具执行，实时打印结构化日志。  
-4. 在 `logs/graphs/` 中生成可视化 HTML 执行图。  
-5. 在 `temp/notes/`、`temp/screenshots/` 中生成对应的输出文件。
+如果你计划在此基础上做二次开发、嵌入到自己的系统或增加新的工具，推荐从上述文档开始。
 
-### 🧩 核心数据模型（Pydantic / C++）
+---
 
-核心数据模型位于 `backend/src/data_models/decision_engine/decision_models.py` 与 `ai_agent_models.hpp` 中，主要包括：
+### 🔭 适用场景与展望
 
-- **TaskGoal**：任务目标与约束（任务描述、优先级、允许使用的工具集合等）。  
-- **WebObservation**：浏览器当前状态快照（URL、HTTP 状态码、关键元素列表、上一步操作反馈等）。  
-- **DecisionAction**：单步操作指令（工具名 + 参数 + 决策解释 + 故障策略）。  
-- **ExecutionNode**：动态执行图节点（父子关系、优先级、运行状态、最新观测结果等）。  
+这个项目更偏向一个 **可二次开发的基础框架**，而不是开箱即用的成品应用。未来可以探索的方向包括：
 
-这些结构通过 JSON Schema 暴露给 LLM，使得 LLM 的规划结果可以被严格验证和回放。
+- 集成到企业内部流程，用于自动化处理固定模板的网页任务  
+- 与知识库、RPA 或工单系统打通，形成完整的「输入需求 → 自动执行 → 结果回写」链路  
+- 拓展更多浏览器工具与本地工具，支持更多垂直场景（数据标注、简单运维操作、报表下载等）  
+- 接入不同的大模型服务，比较在复杂任务拆解和长期执行上的差异
 
-### 📈 可视化审计
+如果你有更具体的业务场景或想法，也可以把这个仓库当作一个起点进行裁剪和改造。
 
-`VisualizationAdapter` 会在以下时机输出执行图快照：
+---
 
-- 初始规划完成后（`*_00_initial_plan.html`）。  
-- 每个步骤执行之后（`*_step_XX_NODE_ID.html`）。  
+### made by like
 
-你可以打开 `logs/graphs/` 下的 HTML 文件，查看每次任务执行的完整决策路径、每个节点的状态变化和依赖关系，用于调试和合规审计。
-
-### 📚 开发手册
-
-开发者可阅读 `docs/DEV_GUIDE.md` 了解：
-
-- 完整的模块分层说明（Agent / Services / Tools / Utils）。  
-- 如何为 Agent 添加新的工具（例如更多浏览器操作、本地应用集成）。  
-- 如何扩展 LLM 提示词和 JSON Schema，让大模型安全地使用新工具。  
-- 常见调试技巧与日志/临时文件管理规范。  
+![CLI Demo](./docs/images/awlikein.jpg)

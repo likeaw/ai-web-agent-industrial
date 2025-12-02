@@ -1,0 +1,31 @@
+# AI Web Agent Industrial - Python Dependencies
+# 
+# Recommended Python version: 3.11.0 (built-in) or 3.9+ (system)
+# Minimum requirement: Python 3.9
+#
+# Installation:
+#   Method 1 (built-in Python): Run run_agent.cmd, auto-check and install
+#   Method 2 (system Python): pip install -r requirements.txt
+
+# Core dependencies
+pydantic>=2.0.0,<3.0.0
+playwright>=1.40.0
+rich>=13.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# Web API dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+python-socketio>=5.10.0
+
+# Office document support (optional)
+python-docx>=1.1.0
+openpyxl>=3.1.0
+python-pptx>=0.6.21
+
+# Note:
+# - Playwright browser drivers need separate installation: playwright install chromium
+# - Office document packages are optional if you don't need Word/Excel/PowerPoint support
+
