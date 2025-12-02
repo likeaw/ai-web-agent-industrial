@@ -1,0 +1,42 @@
+.main-layout {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.left-sider {
+  border-right: 1px solid #e8e8e8;
+  overflow: hidden;
+}
+
+.left-tabs {
+  height: 100%;
+}
+
+.left-tabs .ant-tabs-content-holder {
+  overflow: auto;
+}
+
+.main-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.center-content {
+  flex: 1;
+  overflow: hidden;
+}
+
+.center-tabs {
+  height: 100%;
+}
+
+.center-tabs .ant-tabs-content-holder {
+  overflow: auto;
+}
+
+.right-sider {
+  border-left: 1px solid #e8e8e8;
+  overflow: hidden;
+}
+

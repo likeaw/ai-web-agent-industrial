@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 # 导入 Playwright 同步 API 和 TimeoutError
 from playwright.sync_api import sync_playwright, Page, TimeoutError, Error
@@ -23,6 +24,8 @@ from backend.src.tools.browser import (
     save_current_page_html,
     download_from_link,
 )
+from backend.src.tools.system import resolve_user_path
+from backend.src.utils.path_utils import slugify
 class BrowserService:
     """
     工业级浏览器适配器 (基于 Playwright)。
@@ -334,12 +337,30 @@ class BrowserService:
                 task_topic = action.tool_args.get("task_topic", "web_page")
                 filename = action.tool_args.get("filename")
                 full_page = bool(action.tool_args.get("full_page", True))
+                output_path_arg = action.tool_args.get("output_path")
+                output_dir_arg = action.tool_args.get("output_dir")
+                custom_output_path: Optional[str] = None
+
+                try:
+                    if output_path_arg:
+                        custom_output_path = resolve_user_path(output_path_arg)
+                    elif output_dir_arg:
+                        resolved_dir = resolve_user_path(output_dir_arg)
+                        os.makedirs(resolved_dir, exist_ok=True)
+                        name = filename
+                        if not name:
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            name = f"{slugify(task_topic)}_{ts}.png"
+                        custom_output_path = os.path.join(resolved_dir, name)
+                except ValueError as exc:
+                    raise ValueError(f"Invalid screenshot output path: {exc}") from exc
 
                 screenshot_path = take_screenshot(
                     page=self.page,
                     task_topic=task_topic,
                     filename=filename,
                     full_page=full_page,
+                    custom_path=custom_output_path,
                 )
 
                 feedback.status = "SUCCESS"
