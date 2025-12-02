@@ -168,6 +168,25 @@ run_agent.cmd
 
 ---
 
+## 数据提取工具的进阶能力
+
+- `extract_data` 现在会返回结构化 JSON 文本，格式为：
+  ```json
+  {"result_type":"link_list","items":[{"title":"xxx","url":"https://..."}, ...]}
+  ```
+  便于后续 `create_excel_document` 直接解析并写入表格。
+- 默认会优先解析调用方提供的 selector；若无匹配或 selector 为空，会自动识别百度搜索结果和页面上可点击的链接，补全标题 + URL。
+- 通过 `pre_actions`（数组）可以在提取前执行一些轻量交互，例如：
+  ```json
+  "pre_actions": [
+    {"type": "scroll", "direction": "down", "amount": 1200},
+    {"type": "click", "selector": "#load-more"}
+  ]
+  ```
+  支持的类型包括 `click`、`scroll` 和 `wait`，便于在提取前展开更多内容或触发结果加载。
+
+---
+
 ## 可视化与日志
 
 `VisualizationAdapter` 会在以下时机输出执行图快照：

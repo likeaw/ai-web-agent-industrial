@@ -1,11 +1,12 @@
 # 文件: backend/src/agent/DecisionMaker.py
 
+import json
 import os
 import sys
 import tempfile
 import time
 import uuid
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 
 # Rich 进度条和输出
@@ -80,6 +81,7 @@ class DecisionMaker:
         self.is_running = False
         self.current_node: Optional[ExecutionNode] = None
         self.execution_counter = 0 
+        self.shared_context: Dict[str, Any] = {}
 
     def _init_browser(self):
         """延迟初始化浏览器资源，仅在 run 开始时调用。"""
@@ -121,6 +123,64 @@ class DecisionMaker:
             last_action_feedback=feedback,
             memory_context=memory_context,
         )
+
+    def _update_last_extracted_items(self, feedback: Optional[ActionFeedback]) -> None:
+        """
+        将 extract_data 的结果缓存下来，后续 create_excel_document 可直接复用。
+        """
+        if not feedback or feedback.status != "SUCCESS" or not feedback.message:
+            self.shared_context.pop("last_extracted_items", None)
+            return
+
+        try:
+            payload = json.loads(feedback.message)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        if payload.get("result_type") != "link_list":
+            return
+
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return
+
+        cleaned: List[Dict[str, str]] = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title", "")).strip()
+            url = str(entry.get("url", "")).strip()
+            if not title and not url:
+                continue
+            cleaned.append({"title": title, "url": url})
+
+        if cleaned:
+            self.shared_context["last_extracted_items"] = cleaned
+        else:
+            self.shared_context.pop("last_extracted_items", None)
+
+    def _build_fallback_excel_rows(self) -> Optional[List[List[str]]]:
+        """
+        根据最近一次 extract_data 的缓存构造 Excel 行数据。
+        """
+        items = self.shared_context.get("last_extracted_items")
+        if not isinstance(items, list):
+            return None
+
+        rows: List[List[str]] = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            title = entry.get("title", "")
+            url = entry.get("url", "")
+            if not title and not url:
+                continue
+            rows.append([title, url])
+
+        return rows or None
 
     def _confirm_storage_operation(
         self,
@@ -436,6 +496,14 @@ class DecisionMaker:
                     data = action.tool_args.get("data")  # List[List[Any]]
                     sheet_name = action.tool_args.get("sheet_name", "Sheet1")
                     headers = action.tool_args.get("headers")  # List[str]
+
+                    if not data:
+                        fallback_rows = self._build_fallback_excel_rows()
+                        if fallback_rows:
+                            data = fallback_rows
+                            if not headers:
+                                headers = ["标题", "URL"]
+
                     ok, msg = create_excel_document(path, data=data, sheet_name=sheet_name, headers=headers)
                     fb = ActionFeedback(
                         status="SUCCESS" if ok else "FAILED",
@@ -488,6 +556,8 @@ class DecisionMaker:
                     self._init_browser()
 
                 observation = self.browser_service.execute_action(action)
+                if action.tool_name == "extract_data":
+                    self._update_last_extracted_items(observation.last_action_feedback)
 
             # 结果摘要（仅在失败时输出详细信息）
             fb = observation.last_action_feedback

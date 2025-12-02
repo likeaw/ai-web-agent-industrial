@@ -261,7 +261,7 @@ def is_dangerous_operation(tool_name: str, tool_args: dict) -> Tuple[bool, Optio
             except ValueError:
                 abs_path = os.path.abspath(path)
             if os.path.exists(abs_path):
-                return True, f"Overwrite existing file: {abs_path}"
+                return True, f"[STORAGE] Overwrite existing file: {abs_path}"
 
     # 检查参数中是否包含危险关键词
     args_str = str(tool_args).lower()
