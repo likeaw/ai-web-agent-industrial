@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 # 导入 Playwright 同步 API 和 TimeoutError
 from playwright.sync_api import sync_playwright, Page, TimeoutError, Error
 
@@ -24,6 +24,16 @@ from backend.src.tools.browser import (
     find_link_by_text,
     save_current_page_html,
     download_from_link,
+    extract_page_content,
+)
+from backend.src.tools.browser.llm_html_analyzer import (
+    analyze_html_with_llm,
+    extract_with_llm_analysis,
+)
+from backend.src.tools.browser.human_simulator import (
+    prepare_page_for_extraction,
+    human_like_scroll,
+    random_delay,
 )
 from backend.src.tools.system import resolve_user_path
 from backend.src.utils.path_utils import slugify
@@ -58,35 +68,170 @@ class BrowserService:
         self.browser.close()
         self.playwright.stop()
 
+    def _detect_login_interface(self) -> Tuple[bool, str]:
+        """
+        综合检测登录界面（包括 URL、页面元素和弹窗/模态框）。
+        
+        返回: (是否检测到登录界面, 检测到的类型描述)
+        """
+        try:
+            # 1. 检测 URL 中的登录关键词
+            url = (self.page.url or "").lower()
+            url_keywords = ["login", "signin", "sign-in", "auth", "authenticate", "signin", "log-in"]
+            if any(keyword in url for keyword in url_keywords):
+                return True, "URL contains login keywords"
+            
+            # 2. 检测页面上的密码输入框（包括弹窗中）
+            try:
+                password_inputs = self.page.locator("input[type='password']")
+                if password_inputs.count() > 0:
+                    return True, "Password input field detected"
+            except Exception:
+                pass
+            
+            # 3. 检测弹窗/模态框中的登录相关内容
+            login_keywords_cn = ["登录", "登入", "登陆", "账号登录", "用户登录", "会员登录", "立即登录"]
+            login_keywords_en = ["login", "sign in", "sign-in", "log in", "log-in", "authenticate"]
+            all_login_keywords = login_keywords_cn + login_keywords_en
+            
+            # 常见的弹窗/模态框选择器
+            modal_selectors = [
+                "[role='dialog']",
+                ".modal",
+                ".modal-dialog",
+                ".popup",
+                ".popup-dialog",
+                ".dialog",
+                "[class*='modal']",
+                "[class*='popup']",
+                "[class*='dialog']",
+                "[id*='modal']",
+                "[id*='popup']",
+                "[id*='dialog']",
+                "[id*='login']",
+                "[class*='login']",
+            ]
+            
+            # 检测弹窗是否可见且包含登录关键词
+            for modal_selector in modal_selectors:
+                try:
+                    modals = self.page.locator(modal_selector)
+                    modal_count = modals.count()
+                    
+                    for idx in range(min(modal_count, 5)):  # 最多检查5个弹窗
+                        modal = modals.nth(idx)
+                        
+                        # 检查弹窗是否可见
+                        try:
+                            if not modal.is_visible(timeout=500):
+                                continue
+                        except Exception:
+                            continue
+                        
+                        # 获取弹窗的文本内容
+                        try:
+                            modal_text = modal.inner_text().lower()
+                        except Exception:
+                            continue
+                        
+                        # 检查是否包含登录关键词
+                        if any(keyword.lower() in modal_text for keyword in all_login_keywords):
+                            # 进一步检查弹窗中是否有密码输入框或用户名输入框
+                            has_password_in_modal = False
+                            has_username_in_modal = False
+                            
+                            try:
+                                password_in_modal = modal.locator("input[type='password']")
+                                if password_in_modal.count() > 0:
+                                    has_password_in_modal = True
+                            except Exception:
+                                pass
+                            
+                            try:
+                                username_selectors = [
+                                    "input[type='text']",
+                                    "input[type='email']",
+                                    "input[name*='user']",
+                                    "input[name*='account']",
+                                    "input[name*='login']",
+                                    "input[placeholder*='user']",
+                                    "input[placeholder*='account']",
+                                ]
+                                for username_sel in username_selectors:
+                                    if modal.locator(username_sel).count() > 0:
+                                        has_username_in_modal = True
+                                        break
+                            except Exception:
+                                pass
+                            
+                            if has_password_in_modal or (has_username_in_modal and any(kw in modal_text for kw in ["登录", "login", "sign"])):
+                                return True, f"Login modal/popup detected (contains login keywords and form fields)"
+                            
+                            # 即使没有明确的表单字段，如果包含登录关键词也可能需要登录
+                            if any(kw in modal_text for kw in login_keywords_cn + ["login", "sign in"]):
+                                return True, f"Login modal/popup detected (contains login keywords)"
+                except Exception:
+                    continue
+            
+            # 4. 检测页面主体中的登录相关文本和表单
+            try:
+                page_text = self.page.inner_text("body").lower()
+                if any(keyword.lower() in page_text for keyword in all_login_keywords):
+                    # 检查页面是否有用户名/密码输入框组合
+                    try:
+                        username_inputs = self.page.locator(
+                            "input[type='text'], input[type='email'], input[name*='user'], input[name*='account']"
+                        )
+                        password_inputs = self.page.locator("input[type='password']")
+                        
+                        if username_inputs.count() > 0 and password_inputs.count() > 0:
+                            return True, "Login form detected on page (username + password inputs)"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
+            return False, ""
+        except Exception as e:
+            # 如果检测过程中出错，保守处理，不触发登录等待
+            print(f"[WARN] Error during login detection: {e}")
+            return False, ""
+
     def _maybe_wait_for_manual_login(self):
         """
-        检测是否处于登录页面，如果是且为有头模式，则提示用户在浏览器中完成登录后按回车继续。
-        这样可以在前置登录场景下，避免自动化脚本触发反爬/风控。
+        检测是否处于登录页面或登录弹窗，如果是且为有头模式，则提示用户在浏览器中完成登录后按回车继续。
+        支持检测 URL、页面元素和弹窗/模态框中的登录界面。
         """
         if self._headless or self._login_prompt_shown:
             return
-
+        
+        # 给页面一点时间加载弹窗（如果存在）
         try:
-            url = (self.page.url or "").lower()
+            self.page.wait_for_timeout(1000)  # 等待1秒，让弹窗有时间出现
         except Exception:
-            url = ""
-
-        # 简单启发式：URL 中包含 login / signin / auth，或页面有密码输入框
-        has_password = False
-        try:
-            has_password = self.page.locator("input[type='password']").count() > 0
-        except Exception:
-            has_password = False
-
-        if ("login" in url or "signin" in url or "auth" in url) or has_password:
+            pass
+        
+        # 综合检测登录界面
+        has_login, detection_info = self._detect_login_interface()
+        
+        if has_login:
             self._login_prompt_shown = True
-            print("\n[HUMAN-ASSIST] Possible login page detected.")
-            print("Please complete login in the browser window, then press ENTER here to continue...")
+            print("\n" + "=" * 70)
+            print("[HUMAN-ASSIST] 🔐 登录界面检测")
+            print("=" * 70)
+            print(f"检测到登录界面: {detection_info}")
+            print("\n请在浏览器窗口中完成登录操作（填写用户名、密码等）。")
+            print("登录完成后，请回到此窗口按 ENTER 键继续...")
+            print("=" * 70)
+            
             try:
                 input()
+                print("[HUMAN-ASSIST] ✅ 已收到确认，继续执行任务...\n")
+                # 重置标志，允许后续再次检测（例如页面跳转后可能再次出现登录）
+                self._login_prompt_shown = False
             except EOFError:
                 # 在无法交互的环境下，直接继续，不阻塞
-                print("[HUMAN-ASSIST] Input not available; continuing without manual login wait.")
+                print("[HUMAN-ASSIST] ⚠️  Input not available; continuing without manual login wait.\n")
 
     def _get_selector(self, args: Dict) -> str:
         """
@@ -334,8 +479,12 @@ class BrowserService:
                 # 参数提取
                 selector = action.tool_args.get("selector")
                 attribute = action.tool_args.get("attribute", "text")  # 默认提取元素的文本
-                limit = action.tool_args.get("limit", 3)  # 默认提取前三条
+                limit = action.tool_args.get("limit")  # 可以是 None（提取全部）
                 pre_actions = action.tool_args.get("pre_actions", [])
+                extract_mode = action.tool_args.get("mode", "comprehensive")  # simple, advanced, llm, comprehensive
+                use_llm = action.tool_args.get("use_llm", True)  # 默认使用 LLM 分析
+                extraction_instruction = action.tool_args.get("extraction_instruction", "")  # LLM 提取指令
+                prepare_page = action.tool_args.get("prepare_page", True)  # 是否准备页面（展开折叠、触发懒加载等）
 
                 if not selector:
                     # 回退到通用选择器解析逻辑（支持 xpath / text_content 等）
@@ -344,17 +493,115 @@ class BrowserService:
                     except Exception:
                         selector = None
 
+                # 【关键增强】在提取前全面准备页面，模拟人类操作
+                if prepare_page:
+                    print("[BrowserService] Preparing page for extraction (expanding collapsible content, triggering lazy load)...")
+                    try:
+                        prepare_page_for_extraction(self.page)
+                    except Exception as e:
+                        print(f"[BrowserService] Page preparation warning: {e}")
+
                 if isinstance(pre_actions, list) and pre_actions:
                     self._perform_pre_actions(pre_actions, timeout_ms)
 
-                # 具体提取逻辑委托给 browser_tools，便于单独维护
-                results = extract_search_results(
-                    page=self.page,
-                    current_url=self.page.url,
-                    selector=selector,
-                    attribute=attribute,
-                    limit=limit,
-                )
+                results = []
+                
+                # 根据模式选择提取方法（综合策略）
+                if extract_mode == "comprehensive" or (extract_mode == "llm" or use_llm):
+                    # 综合策略：先尝试 LLM 分析，如果失败则回退到高级提取
+                    print("[BrowserService] Using comprehensive extraction strategy (LLM + Advanced)...")
+                    
+                    # 1. 先尝试 LLM 分析
+                    html_content = self.page.content()
+                    
+                    if extraction_instruction:
+                        extraction_instruction_final = extraction_instruction
+                    else:
+                        extraction_instruction_final = (
+                            "提取页面中所有可以跳转的 URL 链接，格式为标题和 URL 的对应关系。"
+                            "忽略导航栏、页脚、广告等无关链接，重点关注主要内容区域的链接。"
+                            "包括搜索结果、文章链接、产品链接等所有可点击的链接。"
+                        )
+                    
+                    llm_result = analyze_html_with_llm(
+                        html_content,
+                        extraction_instruction_final,
+                        max_html_length=50000
+                    )
+                    
+                    if llm_result.get("success") and "data" in llm_result:
+                        data = llm_result["data"]
+                        if "items" in data and data["items"]:
+                            results = data["items"]
+                        elif "links" in data and data["links"]:
+                            results = data["links"]
+                    
+                    # 2. 如果 LLM 提取失败或结果为空，回退到高级提取
+                    if not results:
+                        print("[BrowserService] LLM extraction returned no results, falling back to advanced extraction...")
+                        page_content = extract_page_content(
+                            page=self.page,
+                            current_url=self.page.url,
+                            mode="links",
+                            selector=selector,
+                            limit=limit,
+                            include_html=False,
+                        )
+                        
+                        if "data" in page_content and "links" in page_content["data"]:
+                            results = page_content["data"]["links"]
+                
+                elif extract_mode == "llm":
+                    # 仅使用 LLM 分析
+                    print("[BrowserService] Using LLM-based HTML analysis for extraction...")
+                    html_content = self.page.content()
+                    
+                    if extraction_instruction:
+                        llm_result = analyze_html_with_llm(
+                            html_content,
+                            extraction_instruction,
+                            max_html_length=50000
+                        )
+                        if llm_result.get("success") and "data" in llm_result:
+                            data = llm_result["data"]
+                            if "items" in data:
+                                results = data["items"]
+                            elif "links" in data:
+                                results = data["links"]
+                    else:
+                        results = extract_with_llm_analysis(
+                            html_content,
+                            task_description=action.tool_args.get("task_description", "提取页面中所有可跳转的 URL 链接"),
+                            max_html_length=50000
+                        )
+                
+                elif extract_mode == "advanced":
+                    # 使用高级提取工具
+                    print("[BrowserService] Using advanced page content extraction...")
+                    page_content = extract_page_content(
+                        page=self.page,
+                        current_url=self.page.url,
+                        mode="links",
+                        selector=selector,
+                        limit=limit,
+                        include_html=False,
+                    )
+                    
+                    if "data" in page_content and "links" in page_content["data"]:
+                        results = page_content["data"]["links"]
+                
+                else:
+                    # 使用原有的简单提取逻辑
+                    if limit is None:
+                        limit = 10  # 默认限制
+                    
+                    results = extract_search_results(
+                        page=self.page,
+                        current_url=self.page.url,
+                        selector=selector,
+                        attribute=attribute,
+                        limit=limit,
+                    )
 
                 if results:
                     feedback.status = "SUCCESS"
@@ -363,7 +610,7 @@ class BrowserService:
                         "items": results,
                     }
                     summary = json.dumps(payload, ensure_ascii=False)
-                    print(f"[BrowserService] extract_data -> {summary}")
+                    print(f"[BrowserService] extract_data -> Extracted {len(results)} items")
                     feedback.message = summary
                 else:
                     feedback.status = "FAILED"
@@ -502,7 +749,11 @@ class BrowserService:
             try:
                 self.page.wait_for_load_state("networkidle", timeout=3000)
             except TimeoutError:
-                pass 
+                pass
+            
+            # 操作完成后，检测是否出现了登录界面（包括弹窗）
+            # 这可以在页面加载或 AJAX 操作完成后捕获突然出现的登录弹窗
+            self._maybe_wait_for_manual_login() 
 
         except Error as e:
             # 捕获所有 Playwright 错误

@@ -3,7 +3,7 @@
 import uuid
 import json 
 import os 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from collections import deque
 from backend.src.services.LLMAdapter import LLMAdapter 
 from backend.src.data_models.decision_engine.decision_models import (
@@ -149,11 +149,20 @@ class DynamicExecutionGraph:
         failed_node.current_status = ExecutionNodeStatus.FAILED
         print(f"[INJECT] Successfully injected {len(correction_plan_fragment)} nodes after {failed_node_id}. Graph updated.")
 
-    def generate_initial_plan_with_llm(self, task_goal: TaskGoal, observation: Optional[WebObservation] = None):
+    def generate_initial_plan_with_llm(
+        self, 
+        task_goal: TaskGoal, 
+        observation: Optional[WebObservation] = None,
+        failed_node_history: Optional[List[Dict[str, Any]]] = None,
+    ):
         """
         调用 LLMAdapter 生成初始计划，并写入执行图。
+        
+        :param task_goal: 任务目标
+        :param observation: 当前观测
+        :param failed_node_history: 失败的节点历史（通常初始规划时为 None）
         """
-        node_candidates = LLMAdapter.generate_nodes(task_goal, observation)
+        node_candidates = LLMAdapter.generate_nodes(task_goal, observation, failed_node_history)
         if not node_candidates:
             raise RuntimeError("LLM returned no execution nodes; cannot start plan.")
 

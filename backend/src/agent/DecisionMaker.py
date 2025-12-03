@@ -80,7 +80,10 @@ class DecisionMaker:
         # 运行时状态
         self.is_running = False
         self.current_node: Optional[ExecutionNode] = None
-        self.execution_counter = 0 
+        self.execution_counter = 0
+        
+        # 失败节点历史记录，用于避免重复生成相同错误的节点
+        self.failed_node_history: List[Dict[str, Any]] = [] 
         self.shared_context: Dict[str, Any] = {}
 
     def _init_browser(self):
@@ -604,6 +607,17 @@ class DecisionMaker:
         console.print(f"[yellow]Node {node.node_id} failed: {feedback.message}[/yellow]")
         self.planner.prune_on_failure(node.node_id, feedback.message)
         
+        # 记录失败的节点到历史中
+        failed_node_record = {
+            "node_id": node.node_id,
+            "tool_name": node.action.tool_name,
+            "tool_args": node.action.tool_args.copy(),
+            "error_message": feedback.message,
+            "reasoning": node.action.reasoning,
+        }
+        self.failed_node_history.append(failed_node_record)
+        console.print(f"[dim]Added node to failure history. Total failed nodes: {len(self.failed_node_history)}[/dim]")
+        
         # 检查节点的失败策略
         if node.action.on_failure_action == "STOP_TASK":
             console.print("[red]Strategy is STOP_TASK. Halting execution.[/red]")
@@ -622,9 +636,13 @@ class DecisionMaker:
                 f"TASK: Generate a short corrective plan (1-3 steps) to fix this error and achieve the original goal."
             )
             
-            # B. 调用 LLM 生成纠错片段
+            # B. 调用 LLM 生成纠错片段，并传递失败节点历史
             try:
-                correction_nodes = LLMAdapter.generate_nodes(correction_goal, observation)
+                correction_nodes = LLMAdapter.generate_nodes(
+                    correction_goal, 
+                    observation,
+                    failed_node_history=self.failed_node_history  # 传递失败历史
+                )
                 
                 if correction_nodes:
                     self.planner.inject_correction_plan(node.node_id, correction_nodes)
@@ -762,7 +780,7 @@ class DecisionMaker:
                 
                 if not self.planner.nodes:
                     progress.update(planning_task, description="[cyan]Phase 1: Generating plan with LLM...")
-                    self.planner.generate_initial_plan_with_llm(self.task_goal)
+                    self.planner.generate_initial_plan_with_llm(self.task_goal, failed_node_history=self.failed_node_history)
                 else:
                     progress.update(planning_task, description="[cyan]Phase 1: Using pre-loaded plan...")
                 
