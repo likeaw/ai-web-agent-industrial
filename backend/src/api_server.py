@@ -92,6 +92,10 @@ def _create_task_goal(description: str) -> TaskGoal:
             "create_excel_document",
             "create_powerpoint_document",
             "create_office_document",
+            # OCR 工具
+            "extract_text_from_image",
+            "extract_text_from_screenshot",
+            "analyze_ocr_text",
         ],
     )
 

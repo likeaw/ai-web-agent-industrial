@@ -213,6 +213,144 @@ def extract_all_elements(
         return result
 
 
+def extract_blog_content(
+    page: Page,
+    selector: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    提取博客/文章正文内容。
+    
+    智能提取页面中的主要内容，包括：
+    - 标题
+    - 正文文本
+    - 作者信息（如果可识别）
+    - 发布时间（如果可识别）
+    
+    :param page: Playwright Page 对象
+    :param selector: 可选的 CSS 选择器，限制提取范围（如主要内容区域）
+    :return: 包含博客内容的字典
+    """
+    result = {
+        "title": "",
+        "content": "",
+        "author": "",
+        "publish_time": "",
+        "url": page.url
+    }
+    
+    try:
+        # 如果指定了选择器，只在该区域内提取
+        target_element = page.locator(selector).first if selector else page
+        
+        # 提取标题（优先查找h1，其次h2）
+        try:
+            title_elem = target_element.locator("h1").first
+            if title_elem.count() > 0:
+                result["title"] = (title_elem.inner_text() or "").strip()
+            else:
+                title_elem = target_element.locator("h2").first
+                if title_elem.count() > 0:
+                    result["title"] = (title_elem.inner_text() or "").strip()
+        except Exception:
+            pass
+        
+        # 提取正文内容（智能提取主要文本区域）
+        try:
+            # 尝试多种策略提取正文
+            # 策略1: 查找常见的文章内容容器
+            content_selectors = [
+                "article",
+                "[role='article']",
+                ".content",
+                ".article-content",
+                ".post-content",
+                ".note-content",
+                "main",
+                ".main-content"
+            ]
+            
+            content_text = ""
+            for sel in content_selectors:
+                try:
+                    content_elem = target_element.locator(sel).first
+                    if content_elem.count() > 0:
+                        content_text = (content_elem.inner_text() or "").strip()
+                        if len(content_text) > 100:  # 如果内容足够长，使用它
+                            break
+                except Exception:
+                    continue
+            
+            # 策略2: 如果没有找到特定容器，提取整个页面的主要文本
+            if not content_text or len(content_text) < 100:
+                content_text = target_element.evaluate("""
+                    (element) => {
+                        // 移除脚本、样式、导航、页脚等无关内容
+                        const clone = element.cloneNode(true);
+                        const toRemove = clone.querySelectorAll(
+                            'script, style, noscript, nav, header, footer, .nav, .header, .footer, .sidebar, .ad, .advertisement, .comment'
+                        );
+                        toRemove.forEach(el => el.remove());
+                        
+                        // 提取文本内容
+                        return clone.innerText || '';
+                    }
+                """)
+                content_text = (content_text or "").strip()
+            
+            result["content"] = content_text
+        except Exception as e:
+            print(f"[page_content_extractor] Error extracting blog content: {e}")
+        
+        # 尝试提取作者信息
+        try:
+            author_selectors = [
+                ".author",
+                "[class*='author']",
+                "[class*='writer']",
+                ".byline",
+                "[itemprop='author']"
+            ]
+            for sel in author_selectors:
+                try:
+                    author_elem = target_element.locator(sel).first
+                    if author_elem.count() > 0:
+                        result["author"] = (author_elem.inner_text() or "").strip()
+                        if result["author"]:
+                            break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        
+        # 尝试提取发布时间
+        try:
+            time_selectors = [
+                "time",
+                "[datetime]",
+                ".publish-time",
+                "[class*='time']",
+                "[class*='date']",
+                "[itemprop='datePublished']"
+            ]
+            for sel in time_selectors:
+                try:
+                    time_elem = target_element.locator(sel).first
+                    if time_elem.count() > 0:
+                        time_text = time_elem.get_attribute("datetime") or time_elem.inner_text()
+                        if time_text:
+                            result["publish_time"] = time_text.strip()
+                            break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        
+        return result
+    except Exception as e:
+        print(f"[page_content_extractor] Error in extract_blog_content: {e}")
+        return result
+
+
 def extract_page_content(
     page: Page,
     current_url: str,
@@ -231,6 +369,7 @@ def extract_page_content(
         - "all": 提取所有元素（链接、按钮、输入框、标题、文本等）
         - "html": 提取 HTML 源码
         - "full": 提取所有内容（包括 HTML）
+        - "blog_content": 提取博客/文章正文内容（标题、正文、作者、发布时间等）
     :param selector: 可选的 CSS 选择器，限制提取范围
     :param limit: 可选的最大提取数量（对链接有效）
     :param include_html: 是否在结果中包含 HTML 源码
@@ -294,6 +433,11 @@ def extract_page_content(
             )
             if include_html or True:  # 默认包含 HTML
                 result["html"] = extract_full_html(page, selector=selector)
+        
+        elif mode == "blog_content":
+            # 提取博客正文内容
+            blog_data = extract_blog_content(page, selector=selector)
+            result["data"] = blog_data
         
         else:
             result["data"] = {"error": f"Unknown mode: {mode}"}

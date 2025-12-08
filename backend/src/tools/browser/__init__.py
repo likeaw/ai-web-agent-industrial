@@ -14,6 +14,7 @@ from .page_content_extractor import (  # noqa: F401
     extract_full_html,
     extract_all_links,
     extract_all_elements,
+    extract_blog_content,
 )
 from .human_simulator import (  # noqa: F401
     prepare_page_for_extraction,

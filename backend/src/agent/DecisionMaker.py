@@ -11,7 +11,15 @@ from dotenv import load_dotenv
 
 # Rich 进度条和输出
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 # --- 核心模块引入 ---
 from backend.src.agent.Planner import DynamicExecutionGraph
@@ -80,7 +88,7 @@ class DecisionMaker:
         # 运行时状态
         self.is_running = False
         self.current_node: Optional[ExecutionNode] = None
-        self.execution_counter = 0
+        self.execution_counter = 0 
         
         # 失败节点历史记录，用于避免重复生成相同错误的节点
         self.failed_node_history: List[Dict[str, Any]] = [] 
@@ -384,10 +392,11 @@ class DecisionMaker:
                 file_path = action.tool_args.get("file_path")
                 initial_content = action.tool_args.get("initial_content", "")
 
-                # 统一获取“最近一次提取结果”的文本形式（每行一个标题）
+                # 统一获取“最近一次提取结果”的文本形式（每行一个标题或正文）
                 titles_text: Optional[str] = None
                 if hasattr(self.planner, "nodes_execution_order"):
                     from ast import literal_eval
+                    import json
 
                     for nid in reversed(self.planner.nodes_execution_order):
                         node = self.planner.nodes.get(nid)
@@ -395,7 +404,33 @@ class DecisionMaker:
                             continue
                         if getattr(node, "resolved_output", None):
                             raw_output = str(node.resolved_output)
-                            if raw_output.startswith("Extracted") and ":" in raw_output:
+                            # 优先尝试解析 JSON（常用于 OCR/LLM 提取结果）
+                            try:
+                                data = json.loads(raw_output)
+                                if isinstance(data, dict):
+                                    # 尝试提取正文字段
+                                    if "content" in data and data["content"]:
+                                        titles_text = str(data["content"])
+                                        break
+                                    # 若包含 text/ocr_text
+                                    if "text" in data and data["text"]:
+                                        titles_text = str(data["text"])
+                                        break
+                                    if "ocr_text" in data and data["ocr_text"]:
+                                        titles_text = str(data["ocr_text"])
+                                        break
+                                    # 若包含 items/links 列表
+                                    if "items" in data and isinstance(data["items"], list) and data["items"]:
+                                        titles_text = "\n".join(str(it) for it in data["items"])
+                                        break
+                                    if "links" in data and isinstance(data["links"], list) and data["links"]:
+                                        titles_text = "\n".join(str(it) for it in data["links"])
+                                        break
+                            except Exception:
+                                pass
+
+                            # 兼容旧格式：Extracted: [...]
+                            if titles_text is None and raw_output.startswith("Extracted") and ":" in raw_output:
                                 try:
                                     list_part = raw_output.split(":", 1)[1].strip()
                                     titles = literal_eval(list_part)
@@ -767,11 +802,18 @@ class DecisionMaker:
         self.is_running = True
         
         with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
+            SpinnerColumn(style="cyan"),
+            TextColumn("[progress.description]{task.description}", style="bold white"),
+            BarColumn(
+                bar_width=40,
+                complete_style="green",
+                finished_style="green",
+                pulse_style="cyan",
+                style="dim",
+            ),
             TaskProgressColumn(),
             TimeElapsedColumn(),
+            TimeRemainingColumn(),
             console=console,
         ) as progress:
             try:

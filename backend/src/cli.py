@@ -16,6 +16,28 @@ import uuid
 from typing import List
 from datetime import datetime
 
+# 修复Windows控制台编码问题
+if sys.platform == "win32":
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleCP(65001)  # UTF-8
+        kernel32.SetConsoleOutputCP(65001)  # UTF-8
+    except Exception:
+        pass
+    
+    # 设置环境变量
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    os.environ['PYTHONUTF8'] = '1'
+    
+    # 重新配置标准输出编码
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
@@ -30,8 +52,11 @@ from rich import box
 from backend.src.data_models.decision_engine.decision_models import TaskGoal
 from backend.src.agent.DecisionMaker import DecisionMaker
 
-
-console = Console()
+# 创建Console时指定UTF-8编码
+try:
+    console = Console(encoding='utf-8', force_terminal=True)
+except Exception:
+    console = Console()
 
 
 def _print_banner() -> None:
@@ -159,6 +184,10 @@ def _create_task_goal(description: str) -> TaskGoal:
             "create_excel_document",
             "create_powerpoint_document",
             "create_office_document",
+            # OCR 工具
+            "extract_text_from_image",
+            "extract_text_from_screenshot",
+            "analyze_ocr_text",
         ],
     )
 
