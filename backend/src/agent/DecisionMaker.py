@@ -522,6 +522,26 @@ class DecisionMaker:
                 if action.tool_name == "create_word_document":
                     path = action.tool_args.get("path", "")
                     content = action.tool_args.get("content")
+                    if content:
+                        candidate = str(content).strip()
+                        # 占位符或模板/系统提示痕迹时，使用最近提取结果兜底
+                        system_like_prefixes = (
+                            "directory created",
+                            "content written",
+                            "content appended",
+                            "safety check failed",
+                            "invalid path",
+                        )
+                        if (
+                            candidate.startswith("{{") and candidate.endswith("}}")
+                            or candidate in ("{}", "[]")
+                            or "节点" in candidate
+                            or "extract" in candidate.lower()
+                            or any(candidate.lower().startswith(p) for p in system_like_prefixes)
+                        ):
+                            content = None
+                    if not content:
+                        content = self._get_latest_extracted_text()
                     title = action.tool_args.get("title")
                     ok, msg = create_word_document(path, content=content, title=title)
                     fb = ActionFeedback(
@@ -709,6 +729,50 @@ class DecisionMaker:
                 f.write(content)
         except Exception as e:
             console.print(f"[yellow][WARN] Visualization failed: {e}[/yellow]")
+
+    def _get_latest_extracted_text(self) -> Optional[str]:
+        """
+        获取最近一次提取节点的文本结果，供落盘/写文档的内容兜底。
+        """
+        if not hasattr(self.planner, "nodes_execution_order"):
+            return None
+
+        from ast import literal_eval
+
+        for nid in reversed(self.planner.nodes_execution_order):
+            node = self.planner.nodes.get(nid)
+            if not node or not getattr(node, "resolved_output", None):
+                continue
+
+            raw_output = str(node.resolved_output)
+            # 优先解析 JSON 结构
+            try:
+                data = json.loads(raw_output)
+                if isinstance(data, dict):
+                    for key in ("content", "text", "ocr_text"):
+                        if data.get(key):
+                            return str(data[key])
+                    for key in ("items", "links"):
+                        if isinstance(data.get(key), list) and data[key]:
+                            return "\n".join(str(it) for it in data[key])
+            except Exception:
+                pass
+
+            # 兼容旧格式 Extracted: [...]
+            if raw_output.startswith("Extracted") and ":" in raw_output:
+                try:
+                    list_part = raw_output.split(":", 1)[1].strip()
+                    titles = literal_eval(list_part)
+                    if isinstance(titles, list) and titles:
+                        return "\n".join(str(t) for t in titles)
+                except Exception:
+                    pass
+
+            # 兜底返回原始字符串
+            if raw_output:
+                return raw_output
+
+        return None
 
     def _resolve_dynamic_args(self, node: ExecutionNode) -> DecisionAction:
         """

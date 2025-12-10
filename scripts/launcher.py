@@ -46,7 +46,8 @@ class AgentLauncher:
     """AI Web Agent Launcher"""
     
     def __init__(self):
-        self.project_root = Path(__file__).parent.absolute()
+        # 脚本位于 scripts/，项目根目录为父级
+        self.project_root = Path(__file__).parent.parent.absolute()
         self.python_exe = self.project_root / "python" / "python.exe"
         self.pip_exe = self.project_root / "python" / "Scripts" / "pip.exe"
         self.logs_dir = self.project_root / "logs"

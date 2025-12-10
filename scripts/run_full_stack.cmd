@@ -3,7 +3,9 @@ REM ============================================================
 REM AI Web Agent - Full Stack Launcher (API + Frontend)
 REM ============================================================
 
-cd /d "%~dp0"
+set "SCRIPT_DIR=%~dp0"
+set "ROOT=%SCRIPT_DIR%.."
+pushd "%ROOT%"
 
 echo.
 echo ============================================================
@@ -18,13 +20,13 @@ echo Press Ctrl+C to stop all servers
 echo.
 
 REM Start API server in a new window
-start "API Server" cmd /k "%~dp0run_api_server.cmd"
+start "API Server" cmd /k "\"%SCRIPT_DIR%run_api_server.cmd\""
 
 REM Wait a bit for API server to start
 timeout /t 3 /nobreak >nul
 
 REM Start frontend in a new window
-start "Frontend Dev Server" cmd /k "%~dp0run_frontend.cmd"
+start "Frontend Dev Server" cmd /k "\"%SCRIPT_DIR%run_frontend.cmd\""
 
 echo.
 echo Both servers are starting...
@@ -36,4 +38,6 @@ echo Close the command windows to stop the servers.
 echo.
 
 pause
+
+popd
 

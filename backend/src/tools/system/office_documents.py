@@ -37,6 +37,7 @@ except ImportError:
     PPTX_AVAILABLE = False
 
 from .file_operations import check_path_safety, resolve_user_path
+from backend.src.utils.path_utils import get_temp_dir
 
 
 def _check_office_library(file_type: str) -> Tuple[bool, Optional[str]]:
@@ -86,6 +87,10 @@ def create_word_document(path: str, content: Optional[str] = None, title: Option
         # 确保父目录存在
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
+        # 先写入项目 temp/notes 下的临时文件，再移动到目标位置，避免中途失败污染目标
+        temp_dir = get_temp_dir("notes")
+        tmp_name = os.path.join(temp_dir, f"tmp_word_{os.path.basename(abs_path)}")
+
         # 创建文档
         doc = Document()
 
@@ -100,12 +105,23 @@ def create_word_document(path: str, content: Optional[str] = None, title: Option
             lines = content.split("\n")
             for line in lines:
                 if line.strip():
-                    para = doc.add_paragraph(line.strip())
+                    doc.add_paragraph(line.strip())
                 else:
                     doc.add_paragraph()  # 空行
 
-        # 保存文档
-        doc.save(abs_path)
+        # 保存到临时文件
+        doc.save(tmp_name)
+
+        # 原子替换/移动到目标位置
+        try:
+            os.replace(tmp_name, abs_path)
+        finally:
+            if os.path.exists(tmp_name):
+                try:
+                    os.remove(tmp_name)
+                except Exception:
+                    pass
+
         return True, f"Word document created: {abs_path}"
 
     except Exception as e:

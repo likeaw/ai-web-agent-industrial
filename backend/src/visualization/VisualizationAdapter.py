@@ -12,14 +12,32 @@ class VisualizationAdapter:
     此模块不再执行文件I/O或打印日志，只专注于数据格式转换。
     """
     
-    # 基础 HTML 模板
+    # 基础 HTML 模板（增加本地 + CDN 双重加载 Mermaid，离线可用性更好）
     HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8" />
     <title>Agent Execution Graph: {title}</title>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+        (function loadMermaid() {{
+            var localSrc = "../../frontend/node_modules/mermaid/dist/mermaid.min.js";
+            var cdnSrc = "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js";
+            function inject(src, onload, onerror) {{
+                var s = document.createElement("script");
+                s.src = src;
+                s.onload = onload;
+                s.onerror = onerror;
+                document.head.appendChild(s);
+            }}
+            // 先尝试本地（适合离线调试），失败则回退 CDN
+            inject(localSrc, function() {{}}, function() {{
+                inject(cdnSrc, function() {{}}, function() {{
+                    console.warn("Mermaid failed to load from local and CDN. Graph will not render.");
+                }});
+            }});
+        }})();
+    </script>
     <style>
         body {{ font-family: sans-serif; padding: 20px; }}
         h1 {{ border-bottom: 2px solid #ccc; padding-bottom: 10px; }}

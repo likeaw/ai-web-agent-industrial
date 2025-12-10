@@ -1,5 +1,8 @@
 @echo off
 chcp 65001 >nul
+set "ROOT=%~dp0.."
+pushd "%ROOT%"
+
 echo 正在解决 .pyc 文件冲突...
 echo.
 
@@ -28,6 +31,10 @@ echo.
 echo 完成！所有 .pyc 文件已从 git 跟踪中移除。
 echo 这些文件将被 .gitignore 忽略，不会再被版本控制。
 pause
+
+popd
+
+
 
 
 

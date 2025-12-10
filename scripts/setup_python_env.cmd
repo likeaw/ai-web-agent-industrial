@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul 2>&1
-cd /d "%~dp0"
+
+set "ROOT=%~dp0.."
+pushd "%ROOT%"
 
 echo.
 echo ============================================================
@@ -68,7 +70,7 @@ if not exist "python\Scripts\pip.exe" (
     echo.
     
     REM 下载 get-pip.py
-    if not exist "python\get-pip.py" (
+if not exist "python\get-pip.py" (
         echo [INFO] Downloading get-pip.py...
         powershell -Command "try { Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile 'python\get-pip.py' -ErrorAction Stop } catch { Write-Host 'Download failed'; exit 1 }"
         if errorlevel 1 (
@@ -193,11 +195,12 @@ echo.
 echo [SUCCESS] Python environment setup completed!
 echo.
 echo Next steps:
-echo   1. Run start.bat to start the application
-echo   2. If packages were not installed, run:
+echo   1. 运行 scripts\start.bat 启动应用
+echo   2. 如未安装依赖，可手动执行:
 echo      python\Scripts\pip.exe install -r requirements.txt
 echo.
 echo Note: For OCR functionality, easyocr will download models
+popd
 echo       automatically on first use (may take a few minutes).
 echo.
 pause

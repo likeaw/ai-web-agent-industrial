@@ -3,13 +3,14 @@ REM ============================================================
 REM AI Web Agent - API Server Launcher
 REM ============================================================
 
-cd /d "%~dp0"
+set "ROOT=%~dp0.."
+pushd "%ROOT%"
 
 REM Set paths
-set "PYTHON_EXE=%~dp0python\python.exe"
-set "PIP_EXE=%~dp0python\Scripts\pip.exe"
-set "LOG_FILE=%~dp0api_server.log"
-set "ERROR_LOG=%~dp0api_server_error.log"
+set "PYTHON_EXE=%ROOT%\python\python.exe"
+set "PIP_EXE=%ROOT%\python\Scripts\pip.exe"
+set "LOG_FILE=%ROOT%\api_server.log"
+set "ERROR_LOG=%ROOT%\api_server_error.log"
 
 REM Check Python
 if not exist "%PYTHON_EXE%" (
@@ -54,4 +55,6 @@ echo.
 "%PYTHON_EXE%" -m backend.src.api_runner >> "%LOG_FILE%" 2>> "%ERROR_LOG%"
 
 pause
+
+popd
 
