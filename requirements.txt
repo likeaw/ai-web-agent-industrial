@@ -25,7 +25,13 @@ python-docx>=1.1.0
 openpyxl>=3.1.0
 python-pptx>=0.6.21
 
+# OCR image text recognition support (optional)
+easyocr>=1.7.0
+Pillow>=10.0.0
+
 # Note:
 # - Playwright browser drivers need separate installation: playwright install chromium
 # - Office document packages are optional if you don't need Word/Excel/PowerPoint support
+# - OCR packages (easyocr, Pillow) are optional if you don't need image text recognition
+#   First-time OCR usage will download models automatically
 

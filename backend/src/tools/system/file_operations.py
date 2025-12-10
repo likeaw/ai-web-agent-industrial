@@ -15,10 +15,12 @@
 """
 
 import os
-import shutil
 import re
+import shutil
+import tempfile
+import time
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 try:
     import ctypes
@@ -162,7 +164,8 @@ def resolve_user_path(path: str) -> str:
 
     规则：
     - 如果路径为绝对路径，直接返回其绝对化结果。
-    - 如果包含“桌面”/“desktop”/"{desktop}"，将其映射到桌面目录。
+    - 如果包含"桌面"/"desktop"/"{desktop}"，将其映射到桌面目录。
+    - 支持"D盘"、"E盘"等中文盘符描述，例如"D盘Desktop"会被解析为"D:\\Desktop"。
     - 其他相对路径映射到用户主目录下的 AIWebAgentOutputs。
     """
     if path is None:
@@ -171,6 +174,23 @@ def resolve_user_path(path: str) -> str:
     raw = str(path).strip()
     if not raw:
         raise ValueError("Path cannot be empty.")
+
+    # 处理中文盘符描述，如"D盘Desktop" -> "D:\\Desktop"
+    # 匹配模式：单个字母 + "盘" + 可选空格 + 路径
+    drive_pattern = re.compile(r'^([A-Za-z])盘\s*(.*)$', re.IGNORECASE)
+    match = drive_pattern.match(raw)
+    if match:
+        drive_letter = match.group(1).upper()
+        rest_path = match.group(2).strip()
+        # 如果剩余路径为空，默认为根目录
+        if not rest_path:
+            raw = f"{drive_letter}:\\"
+        else:
+            # 确保路径以反斜杠开头（Windows路径格式）
+            if not rest_path.startswith(("\\", "/")):
+                raw = f"{drive_letter}:\\{rest_path}"
+            else:
+                raw = f"{drive_letter}:{rest_path}"
 
     expanded = os.path.expandvars(os.path.expanduser(raw))
     normalized = expanded.replace("/", os.sep)
@@ -224,6 +244,34 @@ def check_path_safety(path: str, operation: str = "access") -> Tuple[bool, Optio
                 return False, f"Path is within protected system directory: {dangerous_path}"
 
     return True, None
+
+
+def _cache_content(content: str, target_path: str) -> Optional[str]:
+    """
+    先将待写入内容缓存到项目 temp/other，避免最终写入失败时内容丢失。
+    """
+    try:
+        cache_dir = os.path.join(get_project_root(), "temp", "other")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # 使用目标文件名生成可读的缓存名
+        base_name = os.path.basename(target_path) or "cached"
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", base_name)
+        cache_path = os.path.join(
+            cache_dir, f"write_cache_{safe_name}_{int(time.time() * 1000)}.tmp"
+        )
+        with open(cache_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return cache_path
+    except Exception:
+        return None
+
+
+def _get_project_temp_other() -> str:
+    """统一获取项目内 temp/other 目录。"""
+    temp_dir = os.path.join(get_project_root(), "temp", "other")
+    os.makedirs(temp_dir, exist_ok=True)
+    return temp_dir
 
 
 def is_dangerous_operation(tool_name: str, tool_args: dict) -> Tuple[bool, Optional[str]]:
@@ -405,15 +453,42 @@ def write_file_content(path: str, content: str, append: bool = False) -> Tuple[b
         return False, f"Safety check failed: {error_msg}"
 
     try:
+        # 先把内容写入项目根目录 temp/other 下的缓存文件，再原子替换到目标位置
+        cache_path = _cache_content(content, abs_path)
+
         # 确保父目录存在
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
-        mode = "a" if append else "w"
-        with open(abs_path, mode, encoding="utf-8") as f:
-            f.write(content)
+        if append:
+            # 追加模式仍然直接写入目标，避免读取+合并带来的性能和内存消耗
+            with open(abs_path, "a", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            # 覆盖模式：优先在项目 temp/other 下创建临时文件，再原子替换
+            temp_dir = _get_project_temp_other()
+            try:
+                fd, temp_path = tempfile.mkstemp(
+                    prefix="write_tmp_", suffix=".tmp", dir=temp_dir
+                )
+            except Exception:
+                # 回退方案：若项目 temp 无法创建临时文件，则退回到目标目录
+                fd, temp_path = tempfile.mkstemp(
+                    prefix="write_tmp_", suffix=".tmp", dir=os.path.dirname(abs_path) or None
+                )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                    tmp.write(content)
+                os.replace(temp_path, abs_path)
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
 
         action = "appended to" if append else "written to"
-        return True, f"Content {action}: {abs_path}"
+        extra = f" (cache: {cache_path})" if cache_path else ""
+        return True, f"Content {action}: {abs_path}{extra}"
     except Exception as e:
         return False, f"Failed to write file: {e}"
 

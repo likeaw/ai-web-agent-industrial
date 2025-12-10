@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 # 导入 Playwright 同步 API 和 TimeoutError
 from playwright.sync_api import sync_playwright, Page, TimeoutError, Error
 
@@ -24,10 +24,138 @@ from backend.src.tools.browser import (
     find_link_by_text,
     save_current_page_html,
     download_from_link,
+    extract_page_content,
+)
+from backend.src.tools.browser.llm_html_analyzer import (
+    analyze_html_with_llm,
+    extract_with_llm_analysis,
+)
+from backend.src.tools.browser.human_simulator import (
+    prepare_page_for_extraction,
+    human_like_scroll,
+    random_delay,
 )
 from backend.src.tools.system import resolve_user_path
-from backend.src.utils.path_utils import slugify
+from backend.src.utils.path_utils import slugify, build_temp_file_path
+
+# 尝试导入OCR工具，如果不可用则使用占位符函数
+try:
+    from backend.src.tools.image import (
+        extract_text_from_image,
+        extract_text_from_screenshot,
+        analyze_ocr_text_with_llm,
+        extract_keywords_from_ocr,
+        summarize_ocr_text,
+    )
+    # 检查 OCR 工具的实际可用性
+    from backend.src.tools.image.ocr_tool import EASYOCR_AVAILABLE, EASYOCR_ERROR
+    OCR_AVAILABLE = EASYOCR_AVAILABLE
+    OCR_ERROR_DETAILS = EASYOCR_ERROR
+except (ImportError, OSError) as e:
+    OCR_AVAILABLE = False
+    OCR_ERROR_DETAILS = str(e)
+    print(f"[BrowserService] OCR tools not available: {e}")
+    print("[BrowserService] OCR functionality will be disabled.")
+    
+    # 创建占位符函数
+    def extract_text_from_screenshot(*args, **kwargs):
+        error_msg = "EasyOCR is not available."
+        if OCR_ERROR_DETAILS:
+            if "DLL" in OCR_ERROR_DETAILS or "c10.dll" in OCR_ERROR_DETAILS:
+                error_msg = (
+                    "EasyOCR is installed but cannot load due to missing Visual C++ Redistributable.\n"
+                    "Please install Visual C++ Redistributable from:\n"
+                    "  https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+                    "Or search for 'Visual C++ Redistributable 2015-2022'"
+                )
+            elif "not installed" in OCR_ERROR_DETAILS.lower() or "ImportError" in str(type(e).__name__):
+                error_msg = "EasyOCR is not installed. Please install it with: pip install easyocr"
+            else:
+                error_msg = f"EasyOCR error: {OCR_ERROR_DETAILS}"
+        return {
+            "success": False,
+            "error": error_msg,
+            "text": "",
+            "details": []
+        }
+    
+    def analyze_ocr_text_with_llm(*args, **kwargs):
+        return {
+            "success": False,
+            "error": "OCR tools not available",
+            "data": {}
+        }
+else:
+    # 导入成功，但需要检查实际可用性
+    try:
+        from backend.src.tools.image.ocr_tool import EASYOCR_AVAILABLE, EASYOCR_ERROR
+        OCR_AVAILABLE = EASYOCR_AVAILABLE
+        OCR_ERROR_DETAILS = EASYOCR_ERROR if not EASYOCR_AVAILABLE else None
+    except Exception:
+        OCR_AVAILABLE = True  # 如果无法获取状态，假设可用
+        OCR_ERROR_DETAILS = None
 class BrowserService:
+    def _capture_page_structure(self, task_topic: str = "page_structure") -> Optional[str]:
+        """
+        捕获当前页面的结构信息，保存为 JSON，便于后续回溯页面状态。
+        只保留关键信息并限制数量，防止文件过大。
+        """
+        try:
+            structure = self.page.evaluate(
+                """() => {
+                    const limitList = (arr, limit = 100) => arr.slice(0, limit);
+                    const cleanText = (t) => (t || "").replace(/\\s+/g, " ").trim();
+                    const headings = Array.from(document.querySelectorAll("h1, h2, h3")).map(el => ({
+                        tag: el.tagName,
+                        text: cleanText(el.innerText || el.textContent || ""),
+                    }));
+                    const links = limitList(Array.from(document.querySelectorAll("a[href]")).map(el => ({
+                        text: cleanText(el.innerText || el.textContent || ""),
+                        href: el.getAttribute("href") || "",
+                    })), 120);
+                    const forms = limitList(Array.from(document.querySelectorAll("form")).map(form => ({
+                        action: form.getAttribute("action") || "",
+                        method: (form.getAttribute("method") || "GET").toUpperCase(),
+                        inputs: limitList(Array.from(form.querySelectorAll("input, textarea, select")).map(input => ({
+                            tag: input.tagName,
+                            type: input.getAttribute("type") || "text",
+                            name: input.getAttribute("name") || "",
+                            placeholder: input.getAttribute("placeholder") || "",
+                            label: (() => {
+                                const id = input.getAttribute("id");
+                                if (!id) return "";
+                                const label = document.querySelector(`label[for='${id}']`);
+                                return label ? cleanText(label.innerText || label.textContent || "") : "";
+                            })(),
+                        })), 50),
+                    })), 30);
+                    const sections = limitList(Array.from(document.body.children).map(el => ({
+                        tag: el.tagName,
+                        id: el.getAttribute("id") || "",
+                        class: cleanText(el.getAttribute("class") || ""),
+                        text_sample: cleanText((el.innerText || el.textContent || "").slice(0, 200)),
+                    })), 30);
+                    return {
+                        url: window.location.href,
+                        title: document.title,
+                        headings,
+                        links,
+                        forms,
+                        sections,
+                        timestamp: new Date().toISOString(),
+                    };
+                }"""
+            )
+            path = build_temp_file_path("other", task_topic or "page_structure", ".json")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(structure, f, ensure_ascii=False, indent=2)
+            print(f"[BrowserService] Page structure captured: {path}")
+            return path
+        except Exception as e:
+            print(f"[BrowserService] Failed to capture page structure: {e}")
+            return None
+
     """
     工业级浏览器适配器 (基于 Playwright)。
     职责：执行 DecisionAction，并返回标准化的 WebObservation。
@@ -58,35 +186,170 @@ class BrowserService:
         self.browser.close()
         self.playwright.stop()
 
+    def _detect_login_interface(self) -> Tuple[bool, str]:
+        """
+        综合检测登录界面（包括 URL、页面元素和弹窗/模态框）。
+        
+        返回: (是否检测到登录界面, 检测到的类型描述)
+        """
+        try:
+            # 1. 检测 URL 中的登录关键词
+            url = (self.page.url or "").lower()
+            url_keywords = ["login", "signin", "sign-in", "auth", "authenticate", "signin", "log-in"]
+            if any(keyword in url for keyword in url_keywords):
+                return True, "URL contains login keywords"
+            
+            # 2. 检测页面上的密码输入框（包括弹窗中）
+            try:
+                password_inputs = self.page.locator("input[type='password']")
+                if password_inputs.count() > 0:
+                    return True, "Password input field detected"
+            except Exception:
+                pass
+            
+            # 3. 检测弹窗/模态框中的登录相关内容
+            login_keywords_cn = ["登录", "登入", "登陆", "账号登录", "用户登录", "会员登录", "立即登录"]
+            login_keywords_en = ["login", "sign in", "sign-in", "log in", "log-in", "authenticate"]
+            all_login_keywords = login_keywords_cn + login_keywords_en
+            
+            # 常见的弹窗/模态框选择器
+            modal_selectors = [
+                "[role='dialog']",
+                ".modal",
+                ".modal-dialog",
+                ".popup",
+                ".popup-dialog",
+                ".dialog",
+                "[class*='modal']",
+                "[class*='popup']",
+                "[class*='dialog']",
+                "[id*='modal']",
+                "[id*='popup']",
+                "[id*='dialog']",
+                "[id*='login']",
+                "[class*='login']",
+            ]
+            
+            # 检测弹窗是否可见且包含登录关键词
+            for modal_selector in modal_selectors:
+                try:
+                    modals = self.page.locator(modal_selector)
+                    modal_count = modals.count()
+                    
+                    for idx in range(min(modal_count, 5)):  # 最多检查5个弹窗
+                        modal = modals.nth(idx)
+                        
+                        # 检查弹窗是否可见
+                        try:
+                            if not modal.is_visible(timeout=500):
+                                continue
+                        except Exception:
+                            continue
+                        
+                        # 获取弹窗的文本内容
+                        try:
+                            modal_text = modal.inner_text().lower()
+                        except Exception:
+                            continue
+                        
+                        # 检查是否包含登录关键词
+                        if any(keyword.lower() in modal_text for keyword in all_login_keywords):
+                            # 进一步检查弹窗中是否有密码输入框或用户名输入框
+                            has_password_in_modal = False
+                            has_username_in_modal = False
+                            
+                            try:
+                                password_in_modal = modal.locator("input[type='password']")
+                                if password_in_modal.count() > 0:
+                                    has_password_in_modal = True
+                            except Exception:
+                                pass
+                            
+                            try:
+                                username_selectors = [
+                                    "input[type='text']",
+                                    "input[type='email']",
+                                    "input[name*='user']",
+                                    "input[name*='account']",
+                                    "input[name*='login']",
+                                    "input[placeholder*='user']",
+                                    "input[placeholder*='account']",
+                                ]
+                                for username_sel in username_selectors:
+                                    if modal.locator(username_sel).count() > 0:
+                                        has_username_in_modal = True
+                                        break
+                            except Exception:
+                                pass
+                            
+                            if has_password_in_modal or (has_username_in_modal and any(kw in modal_text for kw in ["登录", "login", "sign"])):
+                                return True, f"Login modal/popup detected (contains login keywords and form fields)"
+                            
+                            # 即使没有明确的表单字段，如果包含登录关键词也可能需要登录
+                            if any(kw in modal_text for kw in login_keywords_cn + ["login", "sign in"]):
+                                return True, f"Login modal/popup detected (contains login keywords)"
+                except Exception:
+                    continue
+            
+            # 4. 检测页面主体中的登录相关文本和表单
+            try:
+                page_text = self.page.inner_text("body").lower()
+                if any(keyword.lower() in page_text for keyword in all_login_keywords):
+                    # 检查页面是否有用户名/密码输入框组合
+                    try:
+                        username_inputs = self.page.locator(
+                            "input[type='text'], input[type='email'], input[name*='user'], input[name*='account']"
+                        )
+                        password_inputs = self.page.locator("input[type='password']")
+                        
+                        if username_inputs.count() > 0 and password_inputs.count() > 0:
+                            return True, "Login form detected on page (username + password inputs)"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
+            return False, ""
+        except Exception as e:
+            # 如果检测过程中出错，保守处理，不触发登录等待
+            print(f"[WARN] Error during login detection: {e}")
+            return False, ""
+
     def _maybe_wait_for_manual_login(self):
         """
-        检测是否处于登录页面，如果是且为有头模式，则提示用户在浏览器中完成登录后按回车继续。
-        这样可以在前置登录场景下，避免自动化脚本触发反爬/风控。
+        检测是否处于登录页面或登录弹窗，如果是且为有头模式，则提示用户在浏览器中完成登录后按回车继续。
+        支持检测 URL、页面元素和弹窗/模态框中的登录界面。
         """
         if self._headless or self._login_prompt_shown:
             return
 
+        # 给页面一点时间加载弹窗（如果存在）
         try:
-            url = (self.page.url or "").lower()
+            self.page.wait_for_timeout(1000)  # 等待1秒，让弹窗有时间出现
         except Exception:
-            url = ""
-
-        # 简单启发式：URL 中包含 login / signin / auth，或页面有密码输入框
-        has_password = False
-        try:
-            has_password = self.page.locator("input[type='password']").count() > 0
-        except Exception:
-            has_password = False
-
-        if ("login" in url or "signin" in url or "auth" in url) or has_password:
+            pass
+        
+        # 综合检测登录界面
+        has_login, detection_info = self._detect_login_interface()
+        
+        if has_login:
             self._login_prompt_shown = True
-            print("\n[HUMAN-ASSIST] Possible login page detected.")
-            print("Please complete login in the browser window, then press ENTER here to continue...")
+            print("\n" + "=" * 70)
+            print("[HUMAN-ASSIST] 🔐 登录界面检测")
+            print("=" * 70)
+            print(f"检测到登录界面: {detection_info}")
+            print("\n请在浏览器窗口中完成登录操作（填写用户名、密码等）。")
+            print("登录完成后，请回到此窗口按 ENTER 键继续...")
+            print("=" * 70)
+            
             try:
                 input()
+                print("[HUMAN-ASSIST] ✅ 已收到确认，继续执行任务...\n")
+                # 重置标志，允许后续再次检测（例如页面跳转后可能再次出现登录）
+                self._login_prompt_shown = False
             except EOFError:
                 # 在无法交互的环境下，直接继续，不阻塞
-                print("[HUMAN-ASSIST] Input not available; continuing without manual login wait.")
+                print("[HUMAN-ASSIST] ⚠️  Input not available; continuing without manual login wait.\n")
 
     def _get_selector(self, args: Dict) -> str:
         """
@@ -295,6 +558,8 @@ class BrowserService:
                 self.page.goto(url, wait_until="load", timeout=timeout_ms)
                 # 导航后检查是否命中登录页面
                 self._maybe_wait_for_manual_login()
+                # 捕获页面结构，便于回退和审计
+                self._capture_page_structure(task_topic=action.tool_args.get("task_topic", "page_structure"))
             
             elif action.tool_name == "type_text":
                 selector = self._get_selector(action.tool_args)
@@ -334,8 +599,14 @@ class BrowserService:
                 # 参数提取
                 selector = action.tool_args.get("selector")
                 attribute = action.tool_args.get("attribute", "text")  # 默认提取元素的文本
-                limit = action.tool_args.get("limit", 3)  # 默认提取前三条
+                limit = action.tool_args.get("limit")  # 可以是 None（提取全部）
                 pre_actions = action.tool_args.get("pre_actions", [])
+                # 【重要】默认使用OCR模式提取内容
+                extract_mode = action.tool_args.get("mode", "ocr")  # 默认使用OCR模式
+                use_ocr = action.tool_args.get("use_ocr", True)  # 默认使用OCR（除非明确设置为False）
+                use_llm = action.tool_args.get("use_llm", True)  # 默认使用 LLM 分析OCR结果
+                extraction_instruction = action.tool_args.get("extraction_instruction", "")  # LLM 提取指令
+                prepare_page = action.tool_args.get("prepare_page", True)  # 是否准备页面（展开折叠、触发懒加载等）
 
                 if not selector:
                     # 回退到通用选择器解析逻辑（支持 xpath / text_content 等）
@@ -344,26 +615,346 @@ class BrowserService:
                     except Exception:
                         selector = None
 
+                # 【关键增强】在提取前全面准备页面，模拟人类操作
+                if prepare_page:
+                    print("[BrowserService] Preparing page for extraction (expanding collapsible content, triggering lazy load)...")
+                    try:
+                        prepare_page_for_extraction(self.page)
+                    except Exception as e:
+                        print(f"[BrowserService] Page preparation warning: {e}")
+
                 if isinstance(pre_actions, list) and pre_actions:
                     self._perform_pre_actions(pre_actions, timeout_ms)
 
-                # 具体提取逻辑委托给 browser_tools，便于单独维护
-                results = extract_search_results(
-                    page=self.page,
-                    current_url=self.page.url,
-                    selector=selector,
-                    attribute=attribute,
-                    limit=limit,
-                )
+                results = []
+                extraction_done = False
+                
+                # 检查是否需要提取博客正文内容
+                extract_blog_mode = action.tool_args.get("extract_blog_content", False)
+                content_type = action.tool_args.get("content_type", "blog_content")  # 默认提取博客内容
+                
+                # 【重要】默认使用OCR方式提取内容（如果OCR可用）
+                if OCR_AVAILABLE and (use_ocr or extract_mode == "ocr" or extract_mode == "comprehensive"):
+                    print("[BrowserService] Using OCR-based extraction (screenshot + OCR)...")
+                    
+                    # 1. 先截图
+                    task_topic = action.tool_args.get("task_topic", "extract_content")
+                    screenshot_path = take_screenshot(
+                        page=self.page,
+                        task_topic=task_topic,
+                        filename=None,
+                        full_page=True,
+                        custom_path=None,
+                    )
+                    
+                    # 2. 使用OCR提取文字
+                    print(f"[BrowserService] Extracting text from screenshot: {screenshot_path}")
+                    ocr_result = extract_text_from_screenshot(
+                        screenshot_path=screenshot_path,
+                        languages=["ch_sim", "en"],
+                        detail=0,
+                    )
+                    
+                    if not ocr_result.get("success"):
+                        print(f"[BrowserService] OCR extraction failed: {ocr_result.get('error')}")
+                        print("[BrowserService] Falling back to HTML-based extraction...")
+                        use_ocr = False
+                    else:
+                        ocr_text = ocr_result.get("text", "")
+                        if not ocr_text or len(ocr_text.strip()) < 10:
+                            print("[BrowserService] OCR extracted empty or very short text")
+                            print("[BrowserService] Falling back to HTML-based extraction...")
+                            use_ocr = False
+                        else:
+                            # 3. 使用LLM分析OCR结果（提取结构化信息）
+                            if use_llm:
+                                print("[BrowserService] Analyzing OCR text with LLM...")
+                                
+                                if extract_blog_mode or content_type == "blog_content":
+                                    # 提取博客内容
+                                    if not extraction_instruction:
+                                        extraction_instruction = (
+                                            "请从以上OCR识别的文本中提取博客/文章内容，包括："
+                                            "1. 文章标题（title）- 如果有的话"
+                                            "2. 正文内容（content）- 完整的文章正文文本，这是最重要的"
+                                            "3. 作者信息（author，如果存在）"
+                                            "4. 发布时间（publish_time，如果存在）"
+                                            "忽略导航栏、页脚、广告、评论区等无关内容，只提取文章的核心正文内容。"
+                                            "返回JSON格式：{\"title\": \"标题\", \"content\": \"正文内容\", \"author\": \"作者\", \"publish_time\": \"时间\"}"
+                                        )
+                                    
+                                    llm_result = analyze_ocr_text_with_llm(ocr_text, extraction_instruction)
+                                    
+                                    if llm_result.get("success") and "data" in llm_result:
+                                        blog_data = llm_result["data"]
+                                        if "content" not in blog_data or not blog_data.get("content"):
+                                            blog_data["content"] = ocr_text
+                                        results = [blog_data]
+                                    else:
+                                        print("[BrowserService] LLM analysis failed, using raw OCR text")
+                                        results = [{
+                                            "title": "",
+                                            "content": ocr_text,
+                                            "author": "",
+                                            "publish_time": "",
+                                            "url": self.page.url
+                                        }]
+                                else:
+                                    # 提取链接或其他内容
+                                    if not extraction_instruction:
+                                        extraction_instruction = (
+                                            "请从以上OCR识别的文本中提取所有可以跳转的URL链接，"
+                                            "格式为标题和URL的对应关系。"
+                                            "忽略导航栏、页脚、广告等无关链接。"
+                                        )
+                                    
+                                    llm_result = analyze_ocr_text_with_llm(ocr_text, extraction_instruction)
+                                    
+                                    if llm_result.get("success") and "data" in llm_result:
+                                        data = llm_result["data"]
+                                        if "items" in data:
+                                            results = data["items"]
+                                        elif "links" in data:
+                                            results = data["links"]
+                                        else:
+                                            results = [{"text": ocr_text, "url": self.page.url}]
+                                    else:
+                                        results = [{"text": ocr_text, "url": self.page.url}]
+                            else:
+                                # 不使用LLM，直接返回OCR文本
+                                if extract_blog_mode or content_type == "blog_content":
+                                    results = [{
+                                        "title": "",
+                                        "content": ocr_text,
+                                        "author": "",
+                                        "publish_time": "",
+                                        "url": self.page.url
+                                    }]
+                                else:
+                                    results = [{"text": ocr_text, "url": self.page.url}]
+                            
+                            extraction_done = True
+                
+                else:
+                    # OCR不可用，直接使用HTML提取
+                    if not OCR_AVAILABLE:
+                        print("[BrowserService] OCR not available, using HTML-based extraction...")
+                        if OCR_ERROR_DETAILS:
+                            if "DLL" in OCR_ERROR_DETAILS or "c10.dll" in OCR_ERROR_DETAILS:
+                                print("[BrowserService] Note: EasyOCR is installed but cannot load.")
+                                print("[BrowserService] Install Visual C++ Redistributable to enable OCR:")
+                                print("[BrowserService]   https://aka.ms/vs/17/release/vc_redist.x64.exe")
+                    use_ocr = False
+                
+                # 回退到传统方法（如果OCR不可用或用户明确禁用，或OCR阶段未产生结果）
+                if (not use_ocr or extract_mode not in ["ocr"]) and not extraction_done:
+                    if extract_mode == "comprehensive" or (extract_mode == "llm" or use_llm):
+                        # 综合策略：先尝试 LLM 分析，如果失败则回退到高级提取
+                        print("[BrowserService] Using comprehensive extraction strategy (LLM + Advanced)...")
+                        
+                        # 1. 先尝试 LLM 分析
+                        html_content = self.page.content()
+                        
+                        if extraction_instruction:
+                            extraction_instruction_final = extraction_instruction
+                        else:
+                            # 根据内容类型生成不同的默认指令
+                            if extract_blog_mode or content_type == "blog_content":
+                                extraction_instruction_final = (
+                                    "提取当前页面的博客/文章正文内容，包括："
+                                    "1. 文章标题（title）"
+                                    "2. 正文内容（content）- 完整的文章正文文本"
+                                    "3. 作者信息（author，如果存在）"
+                                    "4. 发布时间（publish_time，如果存在）"
+                                    "忽略导航栏、页脚、广告、评论区等无关内容，只提取文章的核心正文内容。"
+                                    "返回格式应为JSON，包含title、content、author、publish_time字段。"
+                                )
+                            elif content_type == "both":
+                                extraction_instruction_final = (
+                                    "提取页面中的以下信息："
+                                    "1. 所有可以跳转的 URL 链接（格式为标题和 URL 的对应关系）"
+                                    "2. 如果当前页面是博客/文章页面，提取文章正文内容（包括标题、正文、作者、发布时间）"
+                                    "忽略导航栏、页脚、广告等无关内容，重点关注主要内容区域。"
+                                )
+                            else:
+                                extraction_instruction_final = (
+                                    "提取页面中所有可以跳转的 URL 链接，格式为标题和 URL 的对应关系。"
+                                    "忽略导航栏、页脚、广告等无关链接，重点关注主要内容区域的链接。"
+                                    "包括搜索结果、文章链接、产品链接等所有可点击的链接。"
+                                )
+                        
+                        llm_result = analyze_html_with_llm(
+                            html_content,
+                            extraction_instruction_final,
+                            max_html_length=50000
+                        )
+                        
+                        if llm_result.get("success") and "data" in llm_result:
+                            data = llm_result["data"]
+                            if "items" in data and data["items"]:
+                                results = data["items"]
+                            elif "links" in data and data["links"]:
+                                results = data["links"]
+                            elif "title" in data or "content" in data:
+                                # LLM返回了博客内容格式
+                                results = [data]  # 将博客内容作为单个结果项
+                        
+                        # 2. 如果 LLM 提取失败或结果为空，回退到高级提取
+                        if not results:
+                            print("[BrowserService] LLM extraction returned no results, falling back to advanced extraction...")
+                            
+                            if extract_blog_mode or content_type == "blog_content":
+                                # 提取博客正文内容
+                                page_content = extract_page_content(
+                                    page=self.page,
+                                    current_url=self.page.url,
+                                    mode="blog_content",
+                                    selector=selector,
+                                    include_html=False,
+                                )
+                                if "data" in page_content:
+                                    results = [page_content["data"]]  # 将博客内容作为单个结果项
+                            else:
+                                # 提取链接
+                                page_content = extract_page_content(
+                                    page=self.page,
+                                    current_url=self.page.url,
+                                    mode="links",
+                                    selector=selector,
+                                    limit=limit,
+                                    include_html=False,
+                                )
+                                if "data" in page_content and "links" in page_content["data"]:
+                                    results = page_content["data"]["links"]
+                    
+                    elif extract_mode == "llm":
+                        # 仅使用 LLM 分析
+                        print("[BrowserService] Using LLM-based HTML analysis for extraction...")
+                        html_content = self.page.content()
+                        
+                        if extraction_instruction:
+                            llm_result = analyze_html_with_llm(
+                                html_content,
+                                extraction_instruction,
+                                max_html_length=50000
+                            )
+                            if llm_result.get("success") and "data" in llm_result:
+                                data = llm_result["data"]
+                                if "items" in data:
+                                    results = data["items"]
+                                elif "links" in data:
+                                    results = data["links"]
+                                elif "title" in data or "content" in data:
+                                    # LLM返回了博客内容格式
+                                    results = [data]
+                        else:
+                            if extract_blog_mode or content_type == "blog_content":
+                                extraction_instruction_default = (
+                                    "提取当前页面的博客/文章正文内容，包括标题、正文、作者、发布时间。"
+                                    "返回JSON格式，包含title、content、author、publish_time字段。"
+                                )
+                                llm_result = analyze_html_with_llm(
+                                    html_content,
+                                    extraction_instruction_default,
+                                    max_html_length=50000
+                                )
+                                if llm_result.get("success") and "data" in llm_result:
+                                    results = [llm_result["data"]]
+                            else:
+                                results = extract_with_llm_analysis(
+                                    html_content,
+                                    task_description=action.tool_args.get("task_description", "提取页面中所有可跳转的 URL 链接"),
+                                    max_html_length=50000
+                                )
+                    
+                    elif extract_mode == "advanced":
+                        # 使用高级提取工具
+                        print("[BrowserService] Using advanced page content extraction...")
+                        
+                        if extract_blog_mode or content_type == "blog_content":
+                            # 提取博客正文内容
+                            page_content = extract_page_content(
+                                page=self.page,
+                                current_url=self.page.url,
+                                mode="blog_content",
+                                selector=selector,
+                                include_html=False,
+                            )
+                            if "data" in page_content:
+                                results = [page_content["data"]]
+                        else:
+                            # 提取链接
+                            page_content = extract_page_content(
+                                page=self.page,
+                                current_url=self.page.url,
+                                mode="links",
+                                selector=selector,
+                                limit=limit,
+                                include_html=False,
+                            )
+                            if "data" in page_content and "links" in page_content["data"]:
+                                results = page_content["data"]["links"]
+                    
+                    else:
+                        # 使用原有的简单提取逻辑
+                        if limit is None:
+                            limit = 10  # 默认限制
+                        
+                        if extract_blog_mode or content_type == "blog_content":
+                            # 简单模式下也支持提取博客内容
+                            page_content = extract_page_content(
+                                page=self.page,
+                                current_url=self.page.url,
+                                mode="blog_content",
+                                selector=selector,
+                                include_html=False,
+                            )
+                            if "data" in page_content:
+                                results = [page_content["data"]]
+                        else:
+                            results = extract_search_results(
+                                page=self.page,
+                                current_url=self.page.url,
+                                selector=selector,
+                                attribute=attribute,
+                                limit=limit,
+                            )
 
                 if results:
                     feedback.status = "SUCCESS"
-                    payload = {
-                        "result_type": "link_list",
-                        "items": results,
-                    }
+                    # 判断结果类型：如果是博客内容（包含title或content字段），使用blog_content类型
+                    if results and isinstance(results[0], dict) and ("title" in results[0] or "content" in results[0]):
+                        payload = {
+                            "result_type": "blog_content",
+                            "items": results,
+                        }
+                        # 确保content字段存在且不为空
+                        for item in results:
+                            if isinstance(item, dict):
+                                # 确保content字段存在
+                                if "content" not in item or not item.get("content"):
+                                    # 如果content为空，尝试从其他字段获取
+                                    if "text" in item and item["text"]:
+                                        item["content"] = item["text"]
+                                    elif "ocr_text" in item and item["ocr_text"]:
+                                        item["content"] = item["ocr_text"]
+                                    else:
+                                        # 如果都没有，至少确保content字段存在
+                                        item["content"] = item.get("content", "")
+                                # 确保content是字符串类型
+                                if item.get("content") and not isinstance(item["content"], str):
+                                    item["content"] = str(item["content"])
+                    else:
+                        payload = {
+                            "result_type": "link_list",
+                            "items": results,
+                        }
                     summary = json.dumps(payload, ensure_ascii=False)
-                    print(f"[BrowserService] extract_data -> {summary}")
+                    print(f"[BrowserService] extract_data -> Extracted {len(results)} items (type: {payload['result_type']})")
+                    # 显示内容预览
+                    if results and isinstance(results[0], dict) and "content" in results[0]:
+                        content_preview = str(results[0].get("content", ""))[:200]
+                        print(f"[BrowserService] Content preview (first 200 chars): {content_preview}...")
                     feedback.message = summary
                 else:
                     feedback.status = "FAILED"
@@ -493,7 +1084,154 @@ class BrowserService:
             
             elif action.tool_name == "wait":
                 duration = action.tool_args.get("duration", 2)
-                time.sleep(duration) 
+                time.sleep(duration)
+
+            elif action.tool_name == "extract_text_from_image":
+                # OCR 文字识别工具
+                image_path = action.tool_args.get("image_path")
+                languages = action.tool_args.get("languages", ["ch_sim", "en"])
+                detail = int(action.tool_args.get("detail", 0))
+                
+                if not image_path:
+                    raise ValueError("extract_text_from_image requires 'image_path' in tool_args")
+                
+                # 解析路径
+                try:
+                    resolved_path = resolve_user_path(image_path)
+                except ValueError:
+                    resolved_path = os.path.abspath(image_path)
+                
+                result = extract_text_from_image(
+                    image_path=resolved_path,
+                    languages=languages if isinstance(languages, list) else ["ch_sim", "en"],
+                    detail=detail,
+                )
+                
+                if result.get("success"):
+                    feedback.status = "SUCCESS"
+                    payload = {
+                        "result_type": "ocr_text",
+                        "text": result.get("text", ""),
+                        "details": result.get("details", []),
+                    }
+                    summary = json.dumps(payload, ensure_ascii=False)
+                    feedback.message = summary
+                    print(f"[BrowserService] OCR extracted {len(result.get('text', ''))} characters from image")
+                else:
+                    feedback.status = "FAILED"
+                    feedback.error_code = "OCR_EXTRACTION_FAILED"
+                    feedback.message = f"OCR extraction failed: {result.get('error', 'Unknown error')}"
+                    raise Error(feedback.message)
+
+            elif action.tool_name == "analyze_ocr_text":
+                # OCR 文本分析工具（使用 LLM 分析 OCR 结果）
+                ocr_text = action.tool_args.get("ocr_text")
+                analysis_instruction = action.tool_args.get("analysis_instruction")
+                analysis_type = action.tool_args.get("analysis_type", "custom")  # custom, keywords, summary
+                
+                if not ocr_text:
+                    raise ValueError("analyze_ocr_text requires 'ocr_text' in tool_args")
+                
+                if analysis_type == "keywords":
+                    max_keywords = int(action.tool_args.get("max_keywords", 10))
+                    language = action.tool_args.get("language", "zh")
+                    result = extract_keywords_from_ocr(ocr_text, max_keywords, language)
+                elif analysis_type == "summary":
+                    max_length = int(action.tool_args.get("max_length", 200))
+                    result = summarize_ocr_text(ocr_text, max_length)
+                else:
+                    # 自定义分析
+                    if not analysis_instruction:
+                        raise ValueError("analyze_ocr_text with analysis_type='custom' requires 'analysis_instruction'")
+                    result = analyze_ocr_text_with_llm(ocr_text, analysis_instruction)
+                
+                if result.get("success"):
+                    feedback.status = "SUCCESS"
+                    payload = {
+                        "result_type": "ocr_analysis",
+                        "analysis_type": analysis_type,
+                        "data": result.get("data", {}),
+                    }
+                    summary = json.dumps(payload, ensure_ascii=False)
+                    feedback.message = summary
+                    print(f"[BrowserService] OCR text analysis completed (type: {analysis_type})")
+                else:
+                    feedback.status = "FAILED"
+                    feedback.error_code = "OCR_ANALYSIS_FAILED"
+                    feedback.message = f"OCR text analysis failed: {result.get('error', 'Unknown error')}"
+                    raise Error(feedback.message)
+
+            elif action.tool_name == "extract_text_from_screenshot":
+                # 从截图提取文字（OCR）
+                screenshot_path = action.tool_args.get("screenshot_path")
+                languages = action.tool_args.get("languages", ["ch_sim", "en"])
+                detail = int(action.tool_args.get("detail", 0))
+                analyze_with_llm = bool(action.tool_args.get("analyze_with_llm", False))
+                analysis_instruction = action.tool_args.get("analysis_instruction", "")
+                
+                if not screenshot_path:
+                    raise ValueError("extract_text_from_screenshot requires 'screenshot_path' in tool_args")
+                
+                # 解析路径
+                try:
+                    resolved_path = resolve_user_path(screenshot_path)
+                except ValueError:
+                    resolved_path = os.path.abspath(screenshot_path)
+                
+                # 执行 OCR
+                ocr_result = extract_text_from_screenshot(
+                    screenshot_path=resolved_path,
+                    languages=languages if isinstance(languages, list) else ["ch_sim", "en"],
+                    detail=detail,
+                )
+                
+                if not ocr_result.get("success"):
+                    feedback.status = "FAILED"
+                    feedback.error_code = "OCR_EXTRACTION_FAILED"
+                    feedback.message = f"OCR extraction failed: {ocr_result.get('error', 'Unknown error')}"
+                    raise Error(feedback.message)
+                
+                ocr_text = ocr_result.get("text", "")
+                
+                # 如果需要使用 LLM 分析
+                if analyze_with_llm:
+                    if not analysis_instruction:
+                        analysis_instruction = "提取文本中的关键词和主要内容摘要"
+                    
+                    llm_result = analyze_ocr_text_with_llm(ocr_text, analysis_instruction)
+                    
+                    if llm_result.get("success"):
+                        feedback.status = "SUCCESS"
+                        payload = {
+                            "result_type": "ocr_with_analysis",
+                            "ocr_text": ocr_text,
+                            "analysis": llm_result.get("data", {}),
+                        }
+                        summary = json.dumps(payload, ensure_ascii=False)
+                        feedback.message = summary
+                        print(f"[BrowserService] OCR + LLM analysis completed")
+                    else:
+                        # OCR 成功但 LLM 分析失败，至少返回 OCR 结果
+                        feedback.status = "SUCCESS"
+                        payload = {
+                            "result_type": "ocr_text",
+                            "text": ocr_text,
+                            "analysis_error": llm_result.get("error", "Unknown error"),
+                        }
+                        summary = json.dumps(payload, ensure_ascii=False)
+                        feedback.message = summary
+                        print(f"[BrowserService] OCR completed, but LLM analysis failed")
+                else:
+                    # 只返回 OCR 结果
+                    feedback.status = "SUCCESS"
+                    payload = {
+                        "result_type": "ocr_text",
+                        "text": ocr_text,
+                        "details": ocr_result.get("details", []),
+                    }
+                    summary = json.dumps(payload, ensure_ascii=False)
+                    feedback.message = summary
+                    print(f"[BrowserService] OCR extracted {len(ocr_text)} characters from screenshot")
 
             else:
                 raise ValueError(f"Unsupported tool: {action.tool_name}")
@@ -503,6 +1241,10 @@ class BrowserService:
                 self.page.wait_for_load_state("networkidle", timeout=3000)
             except TimeoutError:
                 pass 
+            
+            # 操作完成后，检测是否出现了登录界面（包括弹窗）
+            # 这可以在页面加载或 AJAX 操作完成后捕获突然出现的登录弹窗
+            self._maybe_wait_for_manual_login() 
 
         except Error as e:
             # 捕获所有 Playwright 错误

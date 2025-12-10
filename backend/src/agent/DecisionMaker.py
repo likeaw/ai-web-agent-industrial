@@ -11,7 +11,15 @@ from dotenv import load_dotenv
 
 # Rich 进度条和输出
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 # --- 核心模块引入 ---
 from backend.src.agent.Planner import DynamicExecutionGraph
@@ -81,6 +89,9 @@ class DecisionMaker:
         self.is_running = False
         self.current_node: Optional[ExecutionNode] = None
         self.execution_counter = 0 
+        
+        # 失败节点历史记录，用于避免重复生成相同错误的节点
+        self.failed_node_history: List[Dict[str, Any]] = [] 
         self.shared_context: Dict[str, Any] = {}
 
     def _init_browser(self):
@@ -381,10 +392,11 @@ class DecisionMaker:
                 file_path = action.tool_args.get("file_path")
                 initial_content = action.tool_args.get("initial_content", "")
 
-                # 统一获取“最近一次提取结果”的文本形式（每行一个标题）
+                # 统一获取“最近一次提取结果”的文本形式（每行一个标题或正文）
                 titles_text: Optional[str] = None
                 if hasattr(self.planner, "nodes_execution_order"):
                     from ast import literal_eval
+                    import json
 
                     for nid in reversed(self.planner.nodes_execution_order):
                         node = self.planner.nodes.get(nid)
@@ -392,7 +404,33 @@ class DecisionMaker:
                             continue
                         if getattr(node, "resolved_output", None):
                             raw_output = str(node.resolved_output)
-                            if raw_output.startswith("Extracted") and ":" in raw_output:
+                            # 优先尝试解析 JSON（常用于 OCR/LLM 提取结果）
+                            try:
+                                data = json.loads(raw_output)
+                                if isinstance(data, dict):
+                                    # 尝试提取正文字段
+                                    if "content" in data and data["content"]:
+                                        titles_text = str(data["content"])
+                                        break
+                                    # 若包含 text/ocr_text
+                                    if "text" in data and data["text"]:
+                                        titles_text = str(data["text"])
+                                        break
+                                    if "ocr_text" in data and data["ocr_text"]:
+                                        titles_text = str(data["ocr_text"])
+                                        break
+                                    # 若包含 items/links 列表
+                                    if "items" in data and isinstance(data["items"], list) and data["items"]:
+                                        titles_text = "\n".join(str(it) for it in data["items"])
+                                        break
+                                    if "links" in data and isinstance(data["links"], list) and data["links"]:
+                                        titles_text = "\n".join(str(it) for it in data["links"])
+                                        break
+                            except Exception:
+                                pass
+
+                            # 兼容旧格式：Extracted: [...]
+                            if titles_text is None and raw_output.startswith("Extracted") and ":" in raw_output:
                                 try:
                                     list_part = raw_output.split(":", 1)[1].strip()
                                     titles = literal_eval(list_part)
@@ -484,6 +522,26 @@ class DecisionMaker:
                 if action.tool_name == "create_word_document":
                     path = action.tool_args.get("path", "")
                     content = action.tool_args.get("content")
+                    if content:
+                        candidate = str(content).strip()
+                        # 占位符或模板/系统提示痕迹时，使用最近提取结果兜底
+                        system_like_prefixes = (
+                            "directory created",
+                            "content written",
+                            "content appended",
+                            "safety check failed",
+                            "invalid path",
+                        )
+                        if (
+                            candidate.startswith("{{") and candidate.endswith("}}")
+                            or candidate in ("{}", "[]")
+                            or "节点" in candidate
+                            or "extract" in candidate.lower()
+                            or any(candidate.lower().startswith(p) for p in system_like_prefixes)
+                        ):
+                            content = None
+                    if not content:
+                        content = self._get_latest_extracted_text()
                     title = action.tool_args.get("title")
                     ok, msg = create_word_document(path, content=content, title=title)
                     fb = ActionFeedback(
@@ -604,6 +662,17 @@ class DecisionMaker:
         console.print(f"[yellow]Node {node.node_id} failed: {feedback.message}[/yellow]")
         self.planner.prune_on_failure(node.node_id, feedback.message)
         
+        # 记录失败的节点到历史中
+        failed_node_record = {
+            "node_id": node.node_id,
+            "tool_name": node.action.tool_name,
+            "tool_args": node.action.tool_args.copy(),
+            "error_message": feedback.message,
+            "reasoning": node.action.reasoning,
+        }
+        self.failed_node_history.append(failed_node_record)
+        console.print(f"[dim]Added node to failure history. Total failed nodes: {len(self.failed_node_history)}[/dim]")
+        
         # 检查节点的失败策略
         if node.action.on_failure_action == "STOP_TASK":
             console.print("[red]Strategy is STOP_TASK. Halting execution.[/red]")
@@ -622,9 +691,13 @@ class DecisionMaker:
                 f"TASK: Generate a short corrective plan (1-3 steps) to fix this error and achieve the original goal."
             )
             
-            # B. 调用 LLM 生成纠错片段
+            # B. 调用 LLM 生成纠错片段，并传递失败节点历史
             try:
-                correction_nodes = LLMAdapter.generate_nodes(correction_goal, observation)
+                correction_nodes = LLMAdapter.generate_nodes(
+                    correction_goal, 
+                    observation,
+                    failed_node_history=self.failed_node_history  # 传递失败历史
+                )
                 
                 if correction_nodes:
                     self.planner.inject_correction_plan(node.node_id, correction_nodes)
@@ -656,6 +729,50 @@ class DecisionMaker:
                 f.write(content)
         except Exception as e:
             console.print(f"[yellow][WARN] Visualization failed: {e}[/yellow]")
+
+    def _get_latest_extracted_text(self) -> Optional[str]:
+        """
+        获取最近一次提取节点的文本结果，供落盘/写文档的内容兜底。
+        """
+        if not hasattr(self.planner, "nodes_execution_order"):
+            return None
+
+        from ast import literal_eval
+
+        for nid in reversed(self.planner.nodes_execution_order):
+            node = self.planner.nodes.get(nid)
+            if not node or not getattr(node, "resolved_output", None):
+                continue
+
+            raw_output = str(node.resolved_output)
+            # 优先解析 JSON 结构
+            try:
+                data = json.loads(raw_output)
+                if isinstance(data, dict):
+                    for key in ("content", "text", "ocr_text"):
+                        if data.get(key):
+                            return str(data[key])
+                    for key in ("items", "links"):
+                        if isinstance(data.get(key), list) and data[key]:
+                            return "\n".join(str(it) for it in data[key])
+            except Exception:
+                pass
+
+            # 兼容旧格式 Extracted: [...]
+            if raw_output.startswith("Extracted") and ":" in raw_output:
+                try:
+                    list_part = raw_output.split(":", 1)[1].strip()
+                    titles = literal_eval(list_part)
+                    if isinstance(titles, list) and titles:
+                        return "\n".join(str(t) for t in titles)
+                except Exception:
+                    pass
+
+            # 兜底返回原始字符串
+            if raw_output:
+                return raw_output
+
+        return None
 
     def _resolve_dynamic_args(self, node: ExecutionNode) -> DecisionAction:
         """
@@ -749,11 +866,18 @@ class DecisionMaker:
         self.is_running = True
         
         with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
+            SpinnerColumn(style="cyan"),
+            TextColumn("[progress.description]{task.description}", style="bold white"),
+            BarColumn(
+                bar_width=40,
+                complete_style="green",
+                finished_style="green",
+                pulse_style="cyan",
+                style="dim",
+            ),
             TaskProgressColumn(),
             TimeElapsedColumn(),
+            TimeRemainingColumn(),
             console=console,
         ) as progress:
             try:
@@ -762,7 +886,7 @@ class DecisionMaker:
                 
                 if not self.planner.nodes:
                     progress.update(planning_task, description="[cyan]Phase 1: Generating plan with LLM...")
-                    self.planner.generate_initial_plan_with_llm(self.task_goal)
+                    self.planner.generate_initial_plan_with_llm(self.task_goal, failed_node_history=self.failed_node_history)
                 else:
                     progress.update(planning_task, description="[cyan]Phase 1: Using pre-loaded plan...")
                 
