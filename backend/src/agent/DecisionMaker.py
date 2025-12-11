@@ -521,27 +521,15 @@ class DecisionMaker:
                 # 执行 Office 文档操作
                 if action.tool_name == "create_word_document":
                     path = action.tool_args.get("path", "")
-                    content = action.tool_args.get("content")
-                    if content:
-                        candidate = str(content).strip()
-                        # 占位符或模板/系统提示痕迹时，使用最近提取结果兜底
-                        system_like_prefixes = (
-                            "directory created",
-                            "content written",
-                            "content appended",
-                            "safety check failed",
-                            "invalid path",
-                        )
-                        if (
-                            candidate.startswith("{{") and candidate.endswith("}}")
-                            or candidate in ("{}", "[]")
-                            or "节点" in candidate
-                            or "extract" in candidate.lower()
-                            or any(candidate.lower().startswith(p) for p in system_like_prefixes)
-                        ):
-                            content = None
+                    raw_content = action.tool_args.get("content")
+                    # 先过滤掉占位/系统提示；若无有效文本，使用最近提取结果
+                    content = self._sanitize_doc_content(raw_content)
                     if not content:
                         content = self._get_latest_extracted_text()
+                    content = self._sanitize_doc_content(content)
+                    # 若仍为空，至少写入“无可用提取内容”提示，避免空文件
+                    if not content:
+                        content = "未获取到可写入的提取内容，请检查提取节点结果或页面结构。"
                     title = action.tool_args.get("title")
                     ok, msg = create_word_document(path, content=content, title=title)
                     fb = ActionFeedback(
@@ -745,6 +733,12 @@ class DecisionMaker:
                 continue
 
             raw_output = str(node.resolved_output)
+            # 过滤纯系统提示行
+            if raw_output.strip().lower().startswith(
+                ("directory created", "content written", "content appended", "safety check failed", "invalid path")
+            ):
+                continue
+
             # 优先解析 JSON 结构
             try:
                 data = json.loads(raw_output)
@@ -773,6 +767,49 @@ class DecisionMaker:
                 return raw_output
 
         return None
+
+    @staticmethod
+    def _sanitize_doc_content(raw: Optional[str]) -> Optional[str]:
+        """
+        过滤掉可能误传的系统提示/占位符，保留用户/提取文本。
+        """
+        if not raw:
+            return None
+        candidate = str(raw).strip()
+        if not candidate:
+            return None
+
+        # 明显占位符或模板
+        if (candidate.startswith("{{") and candidate.endswith("}}")) or candidate in ("{}", "[]"):
+            return None
+
+        lower = candidate.lower()
+        system_prefixes = (
+            "directory created",
+            "content written",
+            "content appended",
+            "safety check failed",
+            "invalid path",
+            "failed to",
+        )
+        if any(lower.startswith(p) for p in system_prefixes):
+            return None
+
+        # 行级过滤：剔除目录/写入提示行，保留有效文本行
+        lines = []
+        for line in candidate.splitlines():
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            low = line_stripped.lower()
+            # 若行包含或以系统提示开头，直接丢弃
+            if any(p in low for p in system_prefixes):
+                continue
+            lines.append(line_stripped)
+
+        if not lines:
+            return None
+        return "\n".join(lines)
 
     def _resolve_dynamic_args(self, node: ExecutionNode) -> DecisionAction:
         """
